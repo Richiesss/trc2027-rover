@@ -40,7 +40,17 @@ docker --version
 docker compose version
 ```
 
-どちらも表示されれば次へ進みます。表示されない場合はインストールします。
+- **SDカードイメージで JetPack を入れた場合**：Docker は最初から入っているので、インストールは不要です。
+- **SDK Manager（PCから書き込み、SSD起動など）で入れた場合**：JetPack 6 では Docker が入らないので、インストールが必要です。
+
+`docker --version` は出るのに `docker compose version` だけエラーになる場合は、Compose を足します。
+
+```bash
+sudo apt update
+sudo apt install -y docker-compose-v2
+```
+
+`docker --version` も出ない場合は、Docker ごとインストールします。
 
 ```bash
 curl -fsSL https://get.docker.com | sh
