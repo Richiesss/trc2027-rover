@@ -1,0 +1,17 @@
+# sandbox/
+sandbox/lidar/unilidar_sdk2/
+*.csv
+*.pcd
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# C++ build
+build/
+
+# OS / editor
+.DS_Store
+.vscode/
