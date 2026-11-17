@@ -4,7 +4,7 @@
 タスク・部品・手順書などのプロジェクト管理はNotionで行っています。
 
 シミュレーション環境（開発用PCのDocker：ROS 2 Jazzy + Gazebo）は別リポジトリ
-[tottori_rover_challenge](https://github.com/Richiesss/tottori_rover_challenge) にあります。
+[trc2027-sim](https://github.com/Richiesss/trc2027-sim) にあります。
 
 ## ディレクトリ構成
 
