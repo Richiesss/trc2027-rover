@@ -15,3 +15,8 @@ build/
 # OS / editor
 .DS_Store
 .vscode/
+
+# Docker
+.env
+logs/*
+!logs/.gitkeep

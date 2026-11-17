@@ -1,0 +1,51 @@
+# trc2027-rover 本番環境（ROS 2 Jazzy）
+# 使い方は docs/docker.md を参照。
+#   docker compose build           # イメージを作る（初回は時間がかかる）
+#   docker compose up -d           # 起動
+#   docker compose exec rover bash # 中に入る
+#   docker compose down            # 停止
+
+services:
+  rover:
+    build:
+      context: docker
+      args:
+        ROS_DISTRO: jazzy
+    image: trc2027-rover:jazzy
+    container_name: trc-rover
+
+    # LiDAR（UDP 6101→6201）と ROS 2 の通信を、Jetson のネットワークのまま使う
+    network_mode: host
+    ipc: host
+
+    environment:
+      # 同じネットワークの他人の ROS 2 と混ざらないよう、チーム専用の番号にする（.env で変更可）
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-27}
+
+    volumes:
+      # 本番のコードは Jetson 側のフォルダをそのまま使う（コンテナを消してもコードは消えない）
+      - ./rover:/ws/src/rover
+      # colcon のビルド結果はボリュームに残し、再起動のたびにビルドし直さなくて済むようにする
+      - ws_build:/ws/build
+      - ws_install:/ws/install
+      - ws_log:/ws/log
+      # 走行ログ・制御履歴の保存先（Jetson 側の ~/trc2027-rover/logs に残る）
+      - ./logs:/ws/logs
+      # USB を後から挿しても認識できるよう、/dev ごと渡す
+      - /dev:/dev
+
+    # 渡した /dev のうち、使ってよいデバイスだけを許可する
+    device_cgroup_rules:
+      - "c 166:* rmw" # /dev/ttyACM*（GNSS：simpleRTK2B）
+      - "c 188:* rmw" # /dev/ttyUSB*（USBシリアル変換）
+      - "c 81:* rmw"  # /dev/video*（USBカメラ）
+
+    stdin_open: true
+    tty: true
+    # 大会用に自動起動させるときは "unless-stopped" に変える
+    restart: "no"
+
+volumes:
+  ws_build:
+  ws_install:
+  ws_log:
