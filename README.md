@@ -5,6 +5,7 @@
 
 シミュレーション環境（開発用PCのDocker：ROS 2 Jazzy + Gazebo）は別リポジトリ
 [trc2027-sim](https://github.com/Richiesss/trc2027-sim) にあります。
+開発用PC（Ubuntu）で `rover/` をシミュレーションで試す方法は、trc2027-sim の [docs/dev-pc.md](https://github.com/Richiesss/trc2027-sim/blob/main/docs/dev-pc.md) を参照。
 
 ## ディレクトリ構成
 
