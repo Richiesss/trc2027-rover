@@ -97,6 +97,42 @@ ros2 topic echo /fake/truth --field latitude
 
 スタートの向きを変えて試す：`ros2 run trc_localization fake_sensors_node --ros-args -p heading_deg:=200.0`
 
+### ダミーの点群で、LiDAR オドメトリまで試す
+
+`fake_sensors_node` は、支柱・岩・砂山を置いた仮想フィールドを、ローバーから見た点群（`/unilidar/cloud`）も出せます。
+これを KISS-ICP に入れて、「点群 → LiDAR オドメトリ → GNSS との融合」まで一通り試せます。
+先に「4. 実機のセンサを動かす」の手順で KISS-ICP をビルドしておきます。
+
+```bash
+source ~/trc2027/deps_ws/install/setup.bash          # KISS-ICP
+source ~/trc2027/trc2027-rover/install/setup.bash
+ros2 launch trc_bringup sim_test.launch.py
+```
+
+別のターミナルで、推定位置と本当の位置を見比べます（小数点以下 6 桁目まで揃えば数 cm の誤差）。
+
+```bash
+ros2 topic echo /gps/filtered --field latitude
+ros2 topic echo /fake/truth --field latitude
+```
+
+GNSS が途切れたときに、LiDAR オドメトリだけで位置を保てるかも試せます（25 秒後から 10 秒間 GNSS を止める）。
+
+```bash
+ros2 launch trc_bringup sim_test.launch.py gnss_outage_start:=25.0 gnss_outage_duration:=10.0
+```
+
+開発環境での結果（2026/11/26）：
+
+| 条件 | 推定位置の誤差（平均 / 最大） |
+| --- | --- |
+| 通常（GNSS は RTK Fix 相当） | 3.1 cm / 8.3 cm |
+| GNSS を 10 秒止めた区間 | 5〜6 cm（LiDAR オドメトリで保てた。GNSS が戻ると元に戻る） |
+
+> **わかったこと**：地面の点が「LiDAR に対していつも同じ位置」に見えると、KISS-ICP はローバーが止まっていると誤認しました（4.9 m 進んだのに 0.7 m と推定）。
+> 実際のフィールドも、平らで目印の少ない砂地では LiDAR オドメトリが弱くなるおそれがあります。GNSS と IMU で補う構成にしているのはこのためです。
+> 実機でも、開けた場所での LiDAR オドメトリの精度を早めに確認しておくこと。
+
 ## 4. 実機のセンサを動かす
 
 ### GNSS
@@ -120,15 +156,27 @@ colcon build --symlink-install
 ```
 
 - unilidar_sdk2 の ROS 2 パッケージの場所や、LiDAR の IP の設定方法は、リポジトリの README を確認してください（点群は `/unilidar/cloud`、IMU は `/unilidar/imu` が初期値）。
-- **LiDAR オドメトリの設定で必ず守ること**
-  - 出力（nav_msgs/Odometry）の座標系を `odom`、ロボット側を `base_link` にする
-  - **TF（odom→base_link）は配信しない**（EKF が配信するので、二重になるとおかしくなる）
-  - 出力トピック名を `lidar_odom_topic` で渡す（例：`ros2 launch trc_bringup localization.launch.py lidar_odom_topic:=/kiss/odometry`）
+- KISS-ICP は apt では入らないので、ソースからビルドします（依存ライブラリはビルド中に自動でダウンロードされる。初回は数分かかる）。
+- 毎回使うなら `~/.bashrc` に追加しておきます：`echo 'source ~/trc2027/deps_ws/install/setup.bash' >> ~/.bashrc`（trc2027-rover の行より**前**に書く）
+
+KISS-ICP は、位置推定に合う設定（`trc_localization/config/kiss_icp.yaml`）で起動します。
+
+```bash
+ros2 launch trc_localization lidar_odometry.launch.py    # 出力は /kiss/odometry
+```
+
+この launch ファイルで、次の設定を済ませています（KISS-ICP をそのまま起動すると合わないので注意）。
+
+- 出力の座標系を `odom`、ロボット側を `base_link` にする（`base_link` からの取付位置は `trc_description` の TF を使う）
+- **TF（odom→base_link）は配信しない**（EKF が配信するので、二重になるとおかしくなる）
+- `use_sim_time` は既定で `false`（KISS-ICP 自体の launch ファイルは既定が `true` なので、実機では使わない）
+- 点ごとの時刻による歪み補正（deskew）は切ってある。L2 の点群に時刻が入っているか確認してから試す
 
 ### 位置推定
 
 ```bash
-ros2 launch trc_bringup localization.launch.py
+ros2 launch trc_localization lidar_odometry.launch.py                        # ターミナル1
+ros2 launch trc_bringup localization.launch.py lidar_odom_topic:=/kiss/odometry  # ターミナル2
 ros2 topic echo /odometry/global   # map 座標の位置と向き
 ```
 

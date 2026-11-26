@@ -1,0 +1,13 @@
+# KISS-ICP（LiDAR オドメトリ）の設定。launch/lidar_odometry.launch.py から読み込む。
+# ROS まわりの設定（座標系・TF）は launch ファイルの側で決めている。
+kiss_icp_node:
+  ros__parameters:
+    data:
+      deskew: false        # 点ごとの時刻で動きの歪みを補正する。L2 の点群に時刻が入っているか確認してから true を試す
+      max_range: 30.0      # これより遠い点は使わない [m]（L2 の測距範囲に合わせる）
+      min_range: 0.5       # これより近い点は使わない [m]（ローバー自身の部品を除く）
+    mapping:
+      max_points_per_voxel: 20
+    adaptive_threshold:
+      initial_threshold: 2.0
+      min_motion_th: 0.1
