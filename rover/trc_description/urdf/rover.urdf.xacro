@@ -1,0 +1,56 @@
+<?xml version="1.0"?>
+<!--
+  ローバーのセンサ取付位置（TF）。
+
+  base_link     : ローバーの基準点（左右の車輪軸の中央、地面からの高さは車軸の高さ）
+  gnss_link     : GNSS アンテナ（ANN-MB2）の中心
+  unilidar_lidar: LiDAR（Unitree L2）の点群の座標系。名前は unilidar_sdk2 の初期値に合わせている
+  unilidar_imu  : L2 内蔵 IMU の座標系。同上
+
+  位置は「base_link から見て」前が +x、左が +y、上が +z（単位 m、角度は rad）。
+  ※ 値はすべて仮。機体ができたら実測して書き換えること（cm 級の精度に直結する）。
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="trc_rover">
+
+  <!-- GNSS アンテナの位置（TODO: 実測） -->
+  <xacro:property name="gnss_x" value="0.0"/>
+  <xacro:property name="gnss_y" value="0.0"/>
+  <xacro:property name="gnss_z" value="0.50"/>
+
+  <!-- LiDAR の位置と向き（TODO: 実測。前向きに水平に付けるなら roll/pitch/yaw は 0） -->
+  <xacro:property name="lidar_x" value="0.20"/>
+  <xacro:property name="lidar_y" value="0.0"/>
+  <xacro:property name="lidar_z" value="0.40"/>
+  <xacro:property name="lidar_roll" value="0.0"/>
+  <xacro:property name="lidar_pitch" value="0.0"/>
+  <xacro:property name="lidar_yaw" value="0.0"/>
+
+  <!-- L2 内部の LiDAR と IMU の位置関係（TODO: メーカーの値に合わせる。仮に一致としている） -->
+  <xacro:property name="imu_in_lidar_x" value="0.0"/>
+  <xacro:property name="imu_in_lidar_y" value="0.0"/>
+  <xacro:property name="imu_in_lidar_z" value="0.0"/>
+
+  <link name="base_link"/>
+  <link name="gnss_link"/>
+  <link name="unilidar_lidar"/>
+  <link name="unilidar_imu"/>
+
+  <joint name="gnss_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="gnss_link"/>
+    <origin xyz="${gnss_x} ${gnss_y} ${gnss_z}" rpy="0 0 0"/>
+  </joint>
+
+  <joint name="lidar_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="unilidar_lidar"/>
+    <origin xyz="${lidar_x} ${lidar_y} ${lidar_z}" rpy="${lidar_roll} ${lidar_pitch} ${lidar_yaw}"/>
+  </joint>
+
+  <joint name="lidar_imu_joint" type="fixed">
+    <parent link="unilidar_lidar"/>
+    <child link="unilidar_imu"/>
+    <origin xyz="${imu_in_lidar_x} ${imu_in_lidar_y} ${imu_in_lidar_z}" rpy="0 0 0"/>
+  </joint>
+
+</robot>

@@ -1,4 +1,7 @@
-# 本番環境（Docker + ROS 2 Jazzy）の構築手順
+# Docker で ROS 2 Jazzy を動かす手順（JetPack 6 の機体向け）
+
+> **2026/11/26 更新**：開発用機 trc-dev は JetPack 7.2.1（Ubuntu 24.04）に焼き直し、ROS 2 Jazzy を直接入れたので、この手順は不要になりました。
+> 普段の開発は [setup-native.md](setup-native.md) を使います。この手順は、JetPack 6（Ubuntu 22.04）の機体で Jazzy を使う必要が出たとき用に残しています。
 
 Jetson の上で、本番用の ROS 2 環境を Docker コンテナとして動かす手順です。
 

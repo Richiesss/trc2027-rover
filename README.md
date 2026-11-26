@@ -11,9 +11,9 @@
 
 ```
 trc2027-rover/
-├── compose.yaml # 本番環境（Docker + ROS 2 Jazzy）の起動設定
-├── docker/     # 本番環境のイメージ（Dockerfile）
-├── rover/      # 本番のコード（ローバーに載せるJetsonで動かす）
+├── rover/      # 本番のコード（ROS 2 パッケージ。リポジトリ直下で colcon build する）
+├── compose.yaml # Docker で動かす場合の設定（JetPack 6 の機体向け）
+├── docker/     # 同上のイメージ（Dockerfile）
 ├── logs/       # 走行ログ・制御履歴の保存先（コミットしない）
 ├── sandbox/    # センサの動作確認用（自由に試す場所。本番には使わない）
 │   ├── gnss/   #   GNSS（simpleRTK2B + NEO-D9C）の動作確認スクリプト
@@ -23,38 +23,40 @@ trc2027-rover/
 
 | フォルダ | ルール |
 | --- | --- |
-| `rover/` | 動作確認で使えると分かったコードだけを整理して置く。Docker（ROS 2 Jazzy）で動かす |
+| `rover/` | 動作確認で使えると分かったコードだけを整理して置く。ROS 2 Jazzy のパッケージにする |
 | `sandbox/` | 何を試してもよい。うまくいった手順はNotionの技術メモに残す |
 | `docs/` | 配線図、IPアドレスやポートなどの設定値、センサの取付位置など |
 
-## Jetsonでの使い方
+## 使い方
 
-Jetsonの共通設定（SSH、LiDAR用の固定IP、シリアル権限など）は、Notionの技術メモ「Jetson環境構築手順」を参照。
+ROS 2 Jazzy を直接使います（開発用機 trc-dev：JetPack 7.2.1 / Ubuntu 24.04）。
+ビルドと起動の手順は **[docs/setup-native.md](docs/setup-native.md)** を参照。
 
 ```bash
-cd ~
+mkdir -p ~/trc2027 && cd ~/trc2027
 git clone https://github.com/Richiesss/trc2027-rover.git
+cd trc2027-rover
+rosdep install --from-paths rover --ignore-src -y
+colcon build --symlink-install
+source install/setup.bash
+```
 
-# 動作確認用のPython環境（仮想環境はリポジトリの外に作る）
+| パッケージ（`rover/`） | 役割 |
+| --- | --- |
+| `trc_gnss` | GNSS（simpleRTK2B）の位置を配信。RTK の状態で誤差の見積もりを切り替える |
+| `trc_localization` | GNSS と LiDAR オドメトリを融合した位置推定（robot_localization）と向きの初期化 |
+| `trc_description` | センサの取付位置（TF） |
+| `trc_bringup` | 起動用の launch と、rosbag の記録 |
+
+センサ単体の動作確認スクリプト（`sandbox/`）は、venv で動かします。
+
+```bash
 python3 -m venv ~/venvs/sandbox
 source ~/venvs/sandbox/bin/activate
-pip install -r ~/trc2027-rover/sandbox/requirements.txt
+pip install -r ~/trc2027/trc2027-rover/sandbox/requirements.txt
 ```
 
-本番環境（Docker + ROS 2 Jazzy）の使い方は [docs/docker.md](docs/docker.md) を参照。
-
-```bash
-cd ~/trc2027-rover
-cp .env.example .env
-docker compose build
-docker compose up -d
-docker compose exec rover bash
-```
-
-| 用途 | 環境 |
-| --- | --- |
-| センサ単体の動作確認（`sandbox/`） | Jetson 上の venv（`~/venvs/sandbox`） |
-| 本番（`rover/`） | Docker コンテナ（ROS 2 Jazzy） |
+JetPack 6（Ubuntu 22.04）の機体で Jazzy を使う場合は、Docker の手順（[docs/docker.md](docs/docker.md)）を使います。
 
 ## ハードウェア構成（予定）
 
@@ -68,5 +70,5 @@ docker compose exec rover bash
 
 ## 注意
 
-- Jetson（JetPack 6）は Ubuntu 22.04 ベースのため、そのままでは ROS 2 Humble になります。シミュレーション環境と同じ Jazzy にそろえるため、本番は Docker コンテナで動かします。
-- Pythonの仮想環境、ログ（CSV・PCD・`logs/`）、`.env`、LiDARのSDKはコミットしないでください（`.gitignore` 参照）。
+- 開発用機は JetPack 7.2.1（Ubuntu 24.04）に焼き直し、ROS 2 Jazzy を直接入れています（2026/11/26）。シミュレーション環境（trc2027-sim）と同じ Jazzy です。
+- Pythonの仮想環境、ビルド結果（`build/` `install/` `log/`）、ログ（CSV・PCD・`logs/`）、`.env`、LiDARのSDKはコミットしないでください（`.gitignore` 参照）。

@@ -1,8 +1,14 @@
-# rover/ — 本番のコード
+# rover/ — 本番のコード（ROS 2 Jazzy パッケージ）
 
-ローバーに載せるJetsonで動かすコードを置きます。
+ローバーで動かす ROS 2 パッケージを置きます。リポジトリのフォルダで `colcon build` すると、ここのパッケージが自動でビルドされます。
+手順は [docs/setup-native.md](../docs/setup-native.md) を参照。
+
+| パッケージ | 役割 |
+| --- | --- |
+| `trc_gnss` | simpleRTK2B の NMEA → `/gnss/fix`（RTK の状態で共分散を切り替え） |
+| `trc_localization` | robot_localization の設定（2段の EKF + navsat_transform）、向きの初期化 `heading_init`、試験用の `fake_sensors_node` |
+| `trc_description` | センサの取付位置（URDF / TF）。値は仮 |
+| `trc_bringup` | 起動用の launch（`sensors` / `localization` / `record`） |
 
 - `sandbox/` で動作を確認できたものだけを、整理してここに移します。
-- Docker コンテナ（ROS 2 Jazzy）の中で動かします。コンテナ内では `/ws/src/rover` に見えます（[docs/docker.md](../docs/docker.md)）。
-- 依存ライブラリは `docker/Dockerfile`（apt）と `docker/requirements.txt`（pip、バージョン固定）に書きます。
 - 大会で提出する制御履歴（時刻・位置・方位・制御指令を1Hz以上）を記録できるようにします。

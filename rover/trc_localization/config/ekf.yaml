@@ -1,0 +1,101 @@
+# robot_localization の設定（2段のEKF + navsat_transform）
+#
+#   ekf_odom : LiDARオドメトリ + IMU を融合 → odom→base_link（滑らかだが、走るほどずれる）
+#   ekf_map  : 上に GNSS を加える          → map→odom（GNSS でずれを直す）
+#   navsat_transform : GNSS の緯度経度を map 座標に変換（/odometry/gps）
+#
+# トピック名は launch/localization.launch.py の引数で差し替えられる。
+# 配列の順番: [x, y, z, roll, pitch, yaw, vx, vy, vz, vroll, vpitch, vyaw, ax, ay, az]
+
+ekf_odom:
+  ros__parameters:
+    frequency: 30.0
+    sensor_timeout: 0.2
+    two_d_mode: true            # まずは平面で考える（坂の登り下りは後で検討）
+    publish_tf: true
+    map_frame: map
+    odom_frame: odom
+    base_link_frame: base_link
+    world_frame: odom
+
+    # LiDARオドメトリ（KISS-ICP / Point-LIO など）。位置の「差分」を速度として使う
+    odom0: /lidar/odom
+    odom0_config: [true,  true,  false,
+                   false, false, true,
+                   false, false, false,
+                   false, false, false,
+                   false, false, false]
+    odom0_differential: true
+    odom0_queue_size: 10
+
+    # L2 内蔵 IMU。北の基準がないので、回転の速さ（vyaw）だけ使う
+    imu0: /unilidar/imu
+    imu0_config: [false, false, false,
+                  false, false, false,
+                  false, false, false,
+                  false, false, true,
+                  false, false, false]
+    imu0_differential: false
+    imu0_remove_gravitational_acceleration: true
+    imu0_queue_size: 50
+
+ekf_map:
+  ros__parameters:
+    frequency: 30.0
+    sensor_timeout: 0.2
+    two_d_mode: true
+    publish_tf: true
+    map_frame: map
+    odom_frame: odom
+    base_link_frame: base_link
+    world_frame: map
+
+    odom0: /lidar/odom
+    odom0_config: [true,  true,  false,
+                   false, false, true,
+                   false, false, false,
+                   false, false, false,
+                   false, false, false]
+    odom0_differential: true
+    odom0_queue_size: 10
+
+    imu0: /unilidar/imu
+    imu0_config: [false, false, false,
+                  false, false, false,
+                  false, false, false,
+                  false, false, true,
+                  false, false, false]
+    imu0_differential: false
+    imu0_remove_gravitational_acceleration: true
+    imu0_queue_size: 50
+
+    # GNSS（navsat_transform が map 座標に直したもの）。位置そのものを使う
+    odom1: /odometry/gps
+    odom1_config: [true,  true,  false,
+                   false, false, false,
+                   false, false, false,
+                   false, false, false,
+                   false, false, false]
+    odom1_differential: false
+    odom1_queue_size: 10
+
+navsat_transform:
+  ros__parameters:
+    frequency: 10.0
+    delay: 0.0
+    magnetic_declination_radians: 0.0   # 向きは heading_init が ENU 基準で出すので補正不要
+    yaw_offset: 0.0                     # heading_init の向きは「東が 0」なので 0
+    zero_altitude: true
+    use_local_cartesian: true           # UTM ではなく、最初の地点を原点にした平面座標
+    broadcast_cartesian_transform: false
+    publish_filtered_gps: true
+    use_odometry_yaw: false
+    wait_for_datum: false
+
+heading_init:
+  ros__parameters:
+    min_distance: 3.0             # この距離以上走ったら向きを決める [m]
+    max_length_mismatch: 0.5      # GNSS とオドメトリの移動距離の差の許容値 [m]
+    max_horizontal_sigma: 0.05    # これより誤差の大きい GNSS（RTK Fix 以外）は使わない [m]
+    yaw_sigma_deg: 2.0
+    publish_rate: 10.0

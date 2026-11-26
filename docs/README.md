@@ -5,4 +5,5 @@
 
 | ファイル | 内容 |
 | --- | --- |
-| [docker.md](docker.md) | 本番環境（Docker + ROS 2 Jazzy）の構築手順 |
+| [setup-native.md](setup-native.md) | ROS 2 Jazzy を直接使う開発手順（ビルド、実機なしの試験、センサ、rosbag） |
+| [docker.md](docker.md) | Docker で Jazzy を動かす手順（JetPack 6 の機体向け。今は不要） |

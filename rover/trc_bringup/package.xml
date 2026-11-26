@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>trc_bringup</name>
+  <version>0.1.0</version>
+  <description>ローバー全体の起動と、走行データ（rosbag）の記録</description>
+  <maintainer email="richiesss@users.noreply.github.com">Ryo Shimano</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>trc_description</exec_depend>
+  <exec_depend>trc_gnss</exec_depend>
+  <exec_depend>trc_localization</exec_depend>
+  <exec_depend>ros2bag</exec_depend>
+  <exec_depend>rosbag2_storage_mcap</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
