@@ -22,6 +22,7 @@ import numpy as np
 import rclpy
 from nav_msgs.msg import Odometry
 from rcl_interfaces.msg import ParameterDescriptor
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from sensor_msgs.msg import Imu, NavSatFix, NavSatStatus, PointCloud2, PointField
 from std_msgs.msg import UInt8
@@ -167,7 +168,7 @@ def main(args=None):
     node = FakeSensors()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):   # Ctrl+C で正常終了する
         pass
     finally:
         node.destroy_node()
