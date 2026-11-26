@@ -16,6 +16,7 @@ import random
 
 import rclpy
 from nav_msgs.msg import Odometry
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from sensor_msgs.msg import Imu, NavSatFix, NavSatStatus
 
@@ -110,7 +111,7 @@ def main(args=None):
     node = FakeSensors()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):   # Ctrl+C で正常終了する
         pass
     finally:
         node.destroy_node()
