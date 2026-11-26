@@ -37,6 +37,7 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2 as pc2
+from std_msgs.msg import Bool
 
 from trc_navigation import dwa
 from trc_navigation import grid_planner as gp
@@ -77,6 +78,10 @@ class LocalPlanner(Node):
         self.goal_tolerance = dp('goal_tolerance', 0.5)
         self.stuck_yaw_rate = dp('stuck_yaw_rate', 0.4)
         self.data_timeout = dp('data_timeout', 0.5)
+        # その場で回り始めたら、前が stop_distance + release_margin まで空き、それが resume_cycles 回続くまで回る
+        # （safety_stop / obstacle_detector の解除の余裕と合わせる。合わないと「進む／止まる」を繰り返す）
+        self.release_margin = dp('release_margin', 0.3)
+        self.resume_cycles = int(self.declare_parameter('resume_cycles', 3).value)
         self.lookahead = dp('lookahead', 2.0)
         self.map_range = dp('map_range', 12.0)   # 地図に書くのはこの距離までの点（遠いほど向きのずれが効く）
         self.pose_buf = deque(maxlen=300)         # (時刻, x, y, yaw)：点群を測った時刻の位置を求めるため
@@ -89,6 +94,9 @@ class LocalPlanner(Node):
         self.pose = None             # (x, y, yaw, 受信時刻)
         self.obstacles = None        # ((M, 2), 受信時刻)
         self.stuck_dir = 0.0
+        self.clear_count = 0
+        self.safety_stop = False
+        self.stuck_log_time = None
         self.done_logged = False
 
         self.cmd_pub = self.create_publisher(Twist, 'cmd_vel', 10)
@@ -100,6 +108,7 @@ class LocalPlanner(Node):
         self.create_subscription(PointCloud2, '/obstacles/points', self.on_obstacles, 5)
         self.create_subscription(PointCloud2, '/obstacles/ground', self.on_ground, 5)
         self.create_subscription(PoseStamped, '/goal_pose', self.on_goal, 5)
+        self.create_subscription(Bool, '/obstacles/stop', self.on_stop, 10)
         self.create_timer(0.1, self.step)
         self.create_timer(1.0, self.replan)
         if self.waypoints:
@@ -163,6 +172,9 @@ class LocalPlanner(Node):
         c, s = math.cos(yaw), math.sin(yaw)
         return np.c_[x + c * base[:, 0] - s * base[:, 1], y + s * base[:, 0] + c * base[:, 1]]
 
+    def on_stop(self, msg: Bool):
+        self.safety_stop = msg.data
+
     def on_goal(self, msg: PoseStamped):
         if msg.header.frame_id not in ('', 'map'):
             self.get_logger().warn(f'目標の座標系 {msg.header.frame_id} は使えません（map で送ってください）')
@@ -220,20 +232,29 @@ class LocalPlanner(Node):
             tx, ty = gp.lookahead_point(self.path, (x, y), self.lookahead)
             target = dwa.to_base(x, y, yaw, np.array([[tx, ty]]))[0]
         plan = dwa.plan(obs, target, self.p)
-        # いまの位置で前がふさがっていれば、安全停止が前進を止めてしまうので、その場で回る
-        blocked_now = dwa.front_blocked(obs, (0.0, 0.0, 0.0), self.p, margin=0.0)
         cmd = Twist()
-        if plan.feasible and not blocked_now:
-            if self.stuck_dir != 0.0:
-                self.get_logger().info('抜け道が見つかりました')
-            self.stuck_dir = 0.0
-            cmd.linear.x, cmd.angular.z = plan.v, plan.w
-        else:
-            # 行き止まり：最初は目標のある側に回り、その後は同じ向きに回り続ける（左右に迷わない）
-            if self.stuck_dir == 0.0:
-                self.stuck_dir = 1.0 if target[1] >= 0.0 else -1.0
-                self.get_logger().info('前に進めないので、その場で回って抜け道を探します')
-            cmd.angular.z = self.stuck_dir * self.stuck_yaw_rate
+        if self.stuck_dir == 0.0:
+            # ふだん：安全停止がかかっている、または前に進める候補がなければ、その場で回り始める
+            if plan.feasible and not self.safety_stop:
+                cmd.linear.x, cmd.angular.z = plan.v, plan.w
+            else:
+                self.stuck_dir = 1.0 if target[1] >= 0.0 else -1.0   # 目指す点のある側へ回る
+                self.clear_count = 0
+                now = self.get_clock().now()
+                if self.stuck_log_time is None or (now - self.stuck_log_time).nanoseconds > 5e9:
+                    self.get_logger().info('前に進めないので、その場で回って抜け道を探します')
+                    self.stuck_log_time = now
+        if self.stuck_dir != 0.0:
+            # 回っている間：同じ向きに回り続け、前が余裕をもって空いた状態が続いたら進み始める
+            clear = (plan.feasible and not self.safety_stop
+                     and not dwa.front_blocked(obs, (0.0, 0.0, 0.0), self.p, margin=self.release_margin))
+            self.clear_count = self.clear_count + 1 if clear else 0
+            if self.clear_count >= self.resume_cycles:
+                self.stuck_dir = 0.0
+                self.get_logger().info('抜け道が見つかりました', throttle_duration_sec=5.0)
+                cmd.linear.x, cmd.angular.z = plan.v, plan.w
+            else:
+                cmd.angular.z = self.stuck_dir * self.stuck_yaw_rate
         self.cmd_pub.publish(cmd)
         self.publish_trajectory(plan.trajectory)
 

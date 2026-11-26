@@ -30,7 +30,7 @@ class DwaParams:
     robot_radius: float = 0.45    # ローバーを円とみなしたときの半径 [m]
     safety_margin: float = 0.25   # さらに空ける距離 [m]
     stop_distance: float = 1.5    # 安全停止の距離（行き着いた先でこれより近い障害物が前にあれば捨てる）[m]
-    stop_margin: float = 0.2      # 安全停止に引っかからないための余裕 [m]
+    stop_margin: float = 0.4      # 安全停止に引っかからないための余裕 [m]（安全停止の解除の余裕 0.3 m より大きく）
     corridor_width: float = 1.0   # 安全停止が見る前方の帯の幅 [m]
     front_offset: float = 0.4     # ローバー前端の x [m]
     clearance_cap: float = 2.0    # これ以上離れていれば余裕は満点 [m]
