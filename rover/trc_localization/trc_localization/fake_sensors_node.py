@@ -10,6 +10,8 @@
   /unilidar/imu   sensor_msgs/Imu        回転の速さだけ
   /gnss/fix       sensor_msgs/NavSatFix  RTK Fix 相当（誤差 sigma_gnss）
   /gnss/quality   std_msgs/UInt8         4（RTK Fix）
+  /fake/world     sensor_msgs/PointCloud2 仮想フィールド全体（map 座標、表示用、10 秒ごと）
+  /fake/truth_path nav_msgs/Path          本当に通った道筋（map 座標、表示用）
 
 あわせて /fake/truth（NavSatFix）に本当の位置を出すので、
 /gps/filtered（推定位置を緯度経度に戻したもの）と比べれば、推定の良し悪しが分かる。
@@ -20,8 +22,10 @@ import random
 
 import numpy as np
 import rclpy
-from nav_msgs.msg import Odometry
+from geometry_msgs.msg import PoseStamped
+from nav_msgs.msg import Odometry, Path
 from rcl_interfaces.msg import ParameterDescriptor
+from rclpy.qos import DurabilityPolicy, QoSProfile
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from sensor_msgs.msg import Imu, NavSatFix, NavSatStatus, PointCloud2, PointField
@@ -63,31 +67,45 @@ class FakeSensors(Node):
         self.quality_pub = self.create_publisher(UInt8, '/gnss/quality', 10)
         self.truth_pub = self.create_publisher(NavSatFix, '/fake/truth', 10)
         self.cloud_pub = self.create_publisher(PointCloud2, '/unilidar/cloud', 5)
+        # 可視化用（map 座標）：仮想フィールド全体と、本当に通った道筋
+        latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.world_pub = self.create_publisher(PointCloud2, '/fake/world', latched)
+        self.truth_path_pub = self.create_publisher(Path, '/fake/truth_path', 10)
+        self.truth_path = Path()
+        self.truth_path.header.frame_id = 'map'
 
         if self.publish_cloud:
             self.rng = np.random.default_rng(0)
             self.world = fake_world.make_world(seed=0)
             self.ground = fake_world.make_ground(seed=0) if self.cloud_ground else np.empty((0, 3))
             self.get_logger().info(f'仮想フィールドを作りました（{len(self.world)} 点）')
+            self.publish_world()
+            self.create_timer(10.0, self.publish_world)   # あとから接続した表示ツールにも届くように
 
         # 本当の状態（ENU: 東 x, 北 y）
         self.t = 0.0
         self.e, self.n, self.yaw = 0.0, 0.0, self.heading0
         self.dt = 0.02
         self.tick = 0
+        self.last_time = None
         self.create_timer(self.dt, self.step)
 
     def yaw_rate(self):
         return 0.0 if self.t < self.straight_time else self.turn_rate
 
     def step(self):
+        # 実際に経った時間で進める（処理が遅い機体でも、動きと時刻が食い違わないように）
+        clock_now = self.get_clock().now()
+        dt = self.dt if self.last_time is None else (clock_now - self.last_time).nanoseconds * 1e-9
+        dt = min(max(dt, 0.0), 0.1)
+        self.last_time = clock_now
         w = self.yaw_rate()
-        self.yaw += w * self.dt
-        self.e += self.speed * math.cos(self.yaw) * self.dt
-        self.n += self.speed * math.sin(self.yaw) * self.dt
-        self.t += self.dt
+        self.yaw += w * dt
+        self.e += self.speed * math.cos(self.yaw) * dt
+        self.n += self.speed * math.sin(self.yaw) * dt
+        self.t += dt
         self.tick += 1
-        now = self.get_clock().now().to_msg()
+        now = clock_now.to_msg()
 
         imu = Imu()                                 # 50 Hz
         imu.header.stamp = now
@@ -127,13 +145,53 @@ class FakeSensors(Node):
                 self.quality_pub.publish(UInt8(data=0))
             self.truth_pub.publish(self.navsat(now, 0.0, 'base_link'))
 
+        if self.tick % 25 == 0:                      # 2 Hz：本当の道筋（map 座標）
+            x, y = self.enu_to_map(self.e, self.n)
+            pose = PoseStamped()
+            pose.header.stamp = now
+            pose.header.frame_id = 'map'
+            pose.pose.position.x, pose.pose.position.y = x, y
+            qx, qy, qz, qw = hm.quaternion_from_yaw(self.yaw - self.heading0)
+            pose.pose.orientation.z, pose.pose.orientation.w = qz, qw
+            self.truth_path.poses.append(pose)
+            if len(self.truth_path.poses) > 5000:
+                del self.truth_path.poses[0]
+            self.truth_path.header.stamp = now
+            self.truth_path_pub.publish(self.truth_path)
+
+    def enu_to_map(self, e, n):
+        """ENU（東・北）を map 座標に直す。
+
+        map 座標は EKF が決める座標で、原点はスタート地点、x 軸はスタート時のローバーの前方。
+        """
+        c, s = math.cos(-self.heading0), math.sin(-self.heading0)
+        return c * e - s * n, s * e + c * n
+
+    def publish_world(self):
+        """仮想フィールド全体を map 座標の点群として配信する（表示用に間引く）。"""
+        rng = np.random.default_rng(1)
+        objects = self.world[rng.choice(len(self.world), min(30000, len(self.world)), replace=False)]
+        parts = [objects]
+        if len(self.ground):
+            parts.append(self.ground[rng.choice(len(self.ground), min(15000, len(self.ground)), replace=False)])
+        pts = np.vstack(parts)
+        c, s = math.cos(-self.heading0), math.sin(-self.heading0)
+        mx = c * pts[:, 0] - s * pts[:, 1]
+        my = s * pts[:, 0] + c * pts[:, 1]
+        self.world_pub.publish(self.to_cloud(np.c_[mx, my, pts[:, 2]].astype(np.float32),
+                                             self.get_clock().now().to_msg(), 'map'))
+
     def make_cloud(self, stamp):
         pts = fake_world.scan(self.world, self.ground, self.e, self.n, self.yaw,
                               self.lidar_x, self.lidar_z, self.cloud_min_range,
                               self.cloud_max_range, self.cloud_points, self.cloud_noise, self.rng)
+        return self.to_cloud(pts, stamp, 'unilidar_lidar')
+
+    @staticmethod
+    def to_cloud(pts, stamp, frame_id):
         msg = PointCloud2()
         msg.header.stamp = stamp
-        msg.header.frame_id = 'unilidar_lidar'
+        msg.header.frame_id = frame_id
         msg.height = 1
         msg.width = len(pts)
         msg.fields = [PointField(name=n, offset=4 * i, datatype=PointField.FLOAT32, count=1)

@@ -147,6 +147,42 @@ ros2 launch trc_bringup sim_test.launch.py gnss_outage_start:=25.0 gnss_outage_d
 > 実際のフィールドも、平らで目印の少ない砂地では LiDAR オドメトリが弱くなるおそれがあります。GNSS と IMU で補う構成にしているのはこのためです。
 > 実機でも、開けた場所での LiDAR オドメトリの精度を早めに確認しておくこと。
 
+### シミュレーションを画面で見る（Mac のブラウザから）
+
+`sim_test.launch.py` は `foxglove_bridge`（ポート 8765）も起動します。trc-dev に画面がなくても、Mac のブラウザで 3D 表示できます。
+
+```bash
+# trc-dev（初回のみ）
+sudo apt install ros-jazzy-foxglove-bridge
+
+# Mac：ポート 8765 を trc-dev に転送（このターミナルは開いたままにする）
+ssh -N -L 8765:localhost:8765 trc-dev
+```
+
+Mac のブラウザで [Foxglove](https://app.foxglove.dev)（無料アカウント）を開き、「Open connection」→「Foxglove WebSocket」→ `ws://localhost:8765` に接続します。
+（Lichtblick でも同じ手順で接続できるはずですが、foxglove_bridge 3.x の新しい通信方式に未対応の版だとつながりません。つながらなければ Foxglove を使う）
+
+表示の設定：
+
+| パネル | 設定 | 見えるもの |
+| --- | --- | --- |
+| 3D | Display frame を `map` | 下の全部 |
+| 3D | `/fake/world` | 仮想フィールド（支柱・岩・壁・地面）。灰色の点 |
+| 3D | `/unilidar/cloud` | LiDAR が今見ている点群（ローバーと一緒に動く） |
+| 3D | `/fake/truth_path` | 本当の軌跡 |
+| 3D | `/localization/path` | 推定した軌跡（これが本当の軌跡に重なれば OK） |
+| 3D | `/gnss/path` | GNSS の測位点（GNSS を止めた区間は途切れる） |
+| 3D | TF | `map → odom → base_link → lidar_link` の座標軸 |
+| Plot | `/fake/position_error.data` | 推定位置の誤差 [m]。0.1 以下なら 10 cm 以内 |
+
+確認ポイント：
+
+- `/unilidar/cloud` の点が `/fake/world` の支柱や岩にぴったり重なる → LiDAR オドメトリと向きの推定が合っている
+- `/localization/path` が `/fake/truth_path` に重なる → 位置推定が合っている
+- `gnss_outage_start:=25.0` で起動すると、`/gnss/path` が途切れても `/localization/path` が本当の軌跡に沿って伸び続ける
+
+画面が不要なときは `foxglove:=false` で bridge を起動しません。
+
 ## 4. 実機のセンサを動かす
 
 ### GNSS
