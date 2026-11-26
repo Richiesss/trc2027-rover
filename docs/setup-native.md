@@ -13,7 +13,8 @@ Ubuntu 24.04 の PC でも同じ手順で使えます。
 | `trc_localization` | robot_localization（2段の EKF + navsat_transform）の設定と、向きの初期化ノード `heading_init`、実機なしで試すための `fake_sensors_node` |
 | `trc_description` | センサの取付位置（URDF / TF）。**値は仮なので、機体ができたら実測して書き換える** |
 | `trc_logging` | 大会提出用の制御履歴（時刻・位置・方位・制御指令）を CSV に記録する `control_history_node` |
-| `trc_perception` | LiDAR の点群から地面を除いて障害物を検出する `obstacle_detector_node` |
+| `trc_perception` | LiDAR の点群から地面を除いて障害物を検出する `obstacle_detector_node`、前方が塞がったら前進を止める `safety_stop_node` |
+| `trc_navigation` | 障害物をよけて目標へ向かう経路計画 `local_planner_node`（A* + DWA） |
 | `trc_bringup` | 起動用の launch（センサ、位置推定、rosbag の記録） |
 
 ```
@@ -244,6 +245,36 @@ fake_sensors（にせのローバー）
 
 > 実機では、走行制御が `/cmd_vel_nav` に指令を出し、`perception.launch.py safety:=true` で `/cmd_vel`（モータ）へ渡す構成を想定しています。モータ側の担当と、トピック名を合わせること。
 > 取付位置（URDF）が合っていないと地面が傾いて見えて誤検出が増えます。本番の砂山や段差でしきい値（`height_threshold`、`max_slope`）の調整も必要です。
+
+### 障害物をよけて目標へ向かう
+
+`sim_test` の運転手は、既定で経路計画（`trc_navigation/local_planner_node`）です。目標（ウェイポイント）へ向かって、障害物をよけながら進みます。
+
+```bash
+./scripts/sim_view.sh                                         # 18 m 先（途中に長い壁）へ
+./scripts/sim_view.sh 'waypoints:=18,-10;18,0;0,-10;0,0'      # 4 地点を回る
+./scripts/sim_view.sh driver:=script obstacle_ahead:=6.0      # これまでの決まった道筋（止まるだけ）
+```
+
+ウェイポイントは map 座標です（原点はスタート地点、x はスタート時の前方、y は左）。Foxglove の 3D パネルの「Publish pose」で `/goal_pose` に送ると、その場で目標を変えられます。
+
+2 段構えで動きます。
+
+1. **地図の上で道筋を探す（1 秒ごと）**：見つけた障害物を map 座標の格子地図（25 cm 四方）に書きため、A* で目標までの道筋を探す。障害物はローバーの半径＋余裕（0.7 m）だけ太らせ、近くは通りにくくして真ん中を通る。地面が見えたマスは記録を減らすので、位置のずれで間違って書いた障害物は消えていく
+2. **目の前をよけて進む（10 Hz）**：道筋の 2 m 先を目指して、DWA で「速さ × 曲がり方」の候補を 4 秒先まで予測し、障害物に近づく・安全停止に引っかかるものを捨てて、進み具合・向き・余裕・速さの点数で選ぶ
+
+前が塞がっているとき（安全停止がかかったときを含む）は、その場で同じ向きに回り、前が 1.8 m 以上空いた状態が続いてから進み始めます。
+
+| トピック | 中身 |
+| --- | --- |
+| `/planner/global_path` | 地図の上で探した道筋（map） |
+| `/planner/map` | 障害物の地図（OccupancyGrid、map） |
+| `/planner/trajectory` | DWA が選んだ動きの予測（base_link） |
+| `/planner/waypoints` | 残りのウェイポイント |
+
+trc-dev での結果（2026/11/26）：4 地点（約 60 m）を約 3 分で回り切り、安全停止は 1 回。
+
+> 注意：開発用サンドボックス（2 コア）では KISS-ICP の処理が 1〜2 秒遅れ、その場での回転が多いと `/odometry/global` の向きが大きくずれることがあった（GNSS を外すと起きない）。trc-dev では問題なく走れているが、実機の Jetson でも CPU に余裕があるか確認すること。
 
 ## 4. 実機のセンサを動かす
 
