@@ -12,6 +12,7 @@ Ubuntu 24.04 の PC でも同じ手順で使えます。
 | `trc_gnss` | simpleRTK2B の NMEA を読み、`/gnss/fix`（NavSatFix）を配信。RTK の状態（Fix / Float / 単独）で共分散を切り替える |
 | `trc_localization` | robot_localization（2段の EKF + navsat_transform）の設定と、向きの初期化ノード `heading_init`、実機なしで試すための `fake_sensors_node` |
 | `trc_description` | センサの取付位置（URDF / TF）。**値は仮なので、機体ができたら実測して書き換える** |
+| `trc_logging` | 大会提出用の制御履歴（時刻・位置・方位・制御指令）を CSV に記録する `control_history_node` |
 | `trc_bringup` | 起動用の launch（センサ、位置推定、rosbag の記録） |
 
 ```
@@ -181,7 +182,32 @@ ros2 topic echo /odometry/global   # map 座標の位置と向き
 
 スタート直後に RTK Fix の状態で 3 m 以上走ると、向きが決まり、GNSS が地図に入り始めます。
 
-## 5. 走行データを記録して、あとで再生する
+## 5. 制御履歴を記録する（大会提出用）
+
+大会規定では、時刻・位置・方位・制御指令を 1 Hz 以上で記録し、提出・説明する必要があります。
+位置推定と一緒に起動すると、`~/trc2027/logs/control_history_日時.csv` に記録されます。
+
+```bash
+ros2 launch trc_bringup localization.launch.py log_history:=true                 # 2 Hz（既定）
+ros2 launch trc_bringup localization.launch.py log_history:=true history_rate:=5 # 5 Hz
+```
+
+| 列 | 内容 |
+| --- | --- |
+| `time` | 記録した時刻（タイムゾーン付き） |
+| `latitude` / `longitude` | 推定位置（`/gps/filtered`） |
+| `map_x` / `map_y` | map 座標の位置 [m] |
+| `heading_deg` | 方位（北が 0 度、時計回り）。向きが決まる前は空欄 |
+| `speed_mps` | 速さ |
+| `gnss_quality` | RTK の状態（4 = Fix） |
+| `cmd_linear` / `cmd_angular` | 制御指令（`/cmd_vel`） |
+| `cmd_age_sec` | 最後に制御指令を受け取ってからの時間 |
+| `control_mode` | 運転の種類（`/control_mode` に送られた文字列。auto / command / remote など） |
+
+- 1行ごとにファイルに書き出すので、途中で電源が落ちても、それまでの記録は残ります。
+- データが来ていない項目は空欄になります（センサが止まっていた時間が後から分かる）。
+
+## 6. 走行データを記録して、あとで再生する
 
 ```bash
 # 記録（計測治具を押して歩くときなど）。~/trc2027/bags/sand_01 に保存
@@ -203,5 +229,4 @@ LiDAR オドメトリも `use_sim_time:=true` で起動してください。
 - [ ] 実データで `trc_gnss` の誤差（`sigma_*`）を調整する
 - [ ] 坂（登坂ゾーン）を走るなら `two_d_mode` を見直す
 - [ ] Jetson で EKF が `Failed to meet update rate` を出す場合は、`ekf.yaml` の `frequency` を 20 などに下げる
-- [ ] 制御履歴（時刻・位置・方位・制御指令を 1 Hz 以上）の記録ノード
 - [ ] 点群から障害物・路面を推定するノード
