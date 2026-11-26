@@ -1,11 +1,15 @@
 """実機なしで位置推定を試すための、にせのセンサ。
 
 ローバーが「東から heading_deg 度の向き」でスタートし、まっすぐ進んでからゆるく曲がる、
-という走行を作り、次の3つを配信する（実機と同じトピック名）:
+という走行を作り、次を配信する（実機と同じトピック名）:
 
-  /lidar/odom    nav_msgs/Odometry   LiDARオドメトリの代わり（スタート地点・向きが原点）
-  /unilidar/imu  sensor_msgs/Imu     回転の速さだけ
-  /gnss/fix      sensor_msgs/NavSatFix  RTK Fix 相当（誤差 sigma_gnss）
+  /lidar/odom     nav_msgs/Odometry      LiDARオドメトリの代わり（publish_odom:=true のとき）
+  /unilidar/cloud sensor_msgs/PointCloud2 にせの点群（publish_cloud:=true のとき）。
+                                          支柱・岩・砂山を置いた仮想フィールドを、ローバーから見た点群。
+                                          KISS-ICP などの LiDAR オドメトリに入力して試せる
+  /unilidar/imu   sensor_msgs/Imu        回転の速さだけ
+  /gnss/fix       sensor_msgs/NavSatFix  RTK Fix 相当（誤差 sigma_gnss）
+  /gnss/quality   std_msgs/UInt8         4（RTK Fix）
 
 あわせて /fake/truth（NavSatFix）に本当の位置を出すので、
 /gps/filtered（推定位置を緯度経度に戻したもの）と比べれば、推定の良し悪しが分かる。
@@ -14,11 +18,15 @@
 import math
 import random
 
+import numpy as np
 import rclpy
 from nav_msgs.msg import Odometry
+from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.node import Node
-from sensor_msgs.msg import Imu, NavSatFix, NavSatStatus
+from sensor_msgs.msg import Imu, NavSatFix, NavSatStatus, PointCloud2, PointField
+from std_msgs.msg import UInt8
 
+from trc_localization import fake_world
 from trc_localization import heading_math as hm
 
 
@@ -26,18 +34,40 @@ class FakeSensors(Node):
 
     def __init__(self):
         super().__init__('fake_sensors')
-        self.heading0 = math.radians(self.declare_parameter('heading_deg', 90.0).value)
+        any_number = ParameterDescriptor(dynamic_typing=True)   # 200 のような整数でも受け付ける
+        self.heading0 = math.radians(float(self.declare_parameter('heading_deg', 90.0, any_number).value))
+        # GNSS が途切れる区間（スタートからの秒数）。LiDAR オドメトリだけで位置を保てるかを試す
+        self.outage_start = float(self.declare_parameter('gnss_outage_start', -1.0, any_number).value)
+        self.outage_duration = float(self.declare_parameter('gnss_outage_duration', 10.0, any_number).value)
         self.speed = self.declare_parameter('speed', 0.5).value
         self.straight_time = self.declare_parameter('straight_time', 12.0).value
         self.turn_rate = self.declare_parameter('turn_rate', 0.15).value
         self.lat0 = self.declare_parameter('lat0', 35.5400).value
         self.lon0 = self.declare_parameter('lon0', 134.2300).value
         self.sigma_gnss = self.declare_parameter('sigma_gnss', 0.02).value
+        self.publish_odom = self.declare_parameter('publish_odom', True).value
+        self.publish_cloud = self.declare_parameter('publish_cloud', False).value
+        # LiDAR の取付位置（trc_description の値と合わせる）と性能
+        self.lidar_x = self.declare_parameter('lidar_x', 0.20).value
+        self.lidar_z = self.declare_parameter('lidar_z', 0.40).value
+        self.cloud_min_range = self.declare_parameter('cloud_min_range', 0.5).value
+        self.cloud_max_range = self.declare_parameter('cloud_max_range', 25.0).value
+        self.cloud_points = self.declare_parameter('cloud_points', 8000).value
+        self.cloud_noise = self.declare_parameter('cloud_noise', 0.02).value
+        self.cloud_ground = self.declare_parameter('cloud_ground', True).value
 
         self.odom_pub = self.create_publisher(Odometry, '/lidar/odom', 10)
         self.imu_pub = self.create_publisher(Imu, '/unilidar/imu', 10)
         self.gnss_pub = self.create_publisher(NavSatFix, '/gnss/fix', 10)
+        self.quality_pub = self.create_publisher(UInt8, '/gnss/quality', 10)
         self.truth_pub = self.create_publisher(NavSatFix, '/fake/truth', 10)
+        self.cloud_pub = self.create_publisher(PointCloud2, '/unilidar/cloud', 5)
+
+        if self.publish_cloud:
+            self.rng = np.random.default_rng(0)
+            self.world = fake_world.make_world(seed=0)
+            self.ground = fake_world.make_ground(seed=0) if self.cloud_ground else np.empty((0, 3))
+            self.get_logger().info(f'仮想フィールドを作りました（{len(self.world)} 点）')
 
         # 本当の状態（ENU: 東 x, 北 y）
         self.t = 0.0
@@ -66,7 +96,10 @@ class FakeSensors(Node):
         imu.orientation_covariance[0] = -1.0         # 向きは出さない（北の基準がない）
         self.imu_pub.publish(imu)
 
-        if self.tick % 5 == 0:                       # 10 Hz
+        if self.tick % 5 == 0 and self.publish_cloud:   # 10 Hz
+            self.cloud_pub.publish(self.make_cloud(now))
+
+        if self.tick % 5 == 0 and self.publish_odom:    # 10 Hz
             # オドメトリ座標 = スタート地点・スタート時の向きが基準
             c, s = math.cos(-self.heading0), math.sin(-self.heading0)
             odom = Odometry()
@@ -84,8 +117,32 @@ class FakeSensors(Node):
             self.odom_pub.publish(odom)
 
         if self.tick % 10 == 0:                      # 5 Hz
-            self.gnss_pub.publish(self.navsat(now, self.sigma_gnss, 'gnss_link'))
+            in_outage = self.outage_start >= 0.0 and \
+                self.outage_start <= self.t < self.outage_start + self.outage_duration
+            if not in_outage:
+                self.gnss_pub.publish(self.navsat(now, self.sigma_gnss, 'gnss_link'))
+                self.quality_pub.publish(UInt8(data=4))
+            else:
+                self.quality_pub.publish(UInt8(data=0))
             self.truth_pub.publish(self.navsat(now, 0.0, 'base_link'))
+
+    def make_cloud(self, stamp):
+        pts = fake_world.scan(self.world, self.ground, self.e, self.n, self.yaw,
+                              self.lidar_x, self.lidar_z, self.cloud_min_range,
+                              self.cloud_max_range, self.cloud_points, self.cloud_noise, self.rng)
+        msg = PointCloud2()
+        msg.header.stamp = stamp
+        msg.header.frame_id = 'unilidar_lidar'
+        msg.height = 1
+        msg.width = len(pts)
+        msg.fields = [PointField(name=n, offset=4 * i, datatype=PointField.FLOAT32, count=1)
+                      for i, n in enumerate(('x', 'y', 'z'))]
+        msg.is_bigendian = False
+        msg.point_step = 12
+        msg.row_step = 12 * len(pts)
+        msg.is_dense = True
+        msg.data = pts.tobytes()
+        return msg
 
     def navsat(self, stamp, sigma, frame):
         e = self.e + random.gauss(0.0, sigma) if sigma > 0 else self.e
