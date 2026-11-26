@@ -3,10 +3,13 @@
   ros2 launch trc_bringup sim_test.launch.py
   ros2 launch trc_bringup sim_test.launch.py heading_deg:=200.0 log_history:=true
   ros2 launch trc_bringup sim_test.launch.py gnss_outage_start:=25.0   # 25 秒後から 10 秒間 GNSS を切る
-  ros2 launch trc_bringup sim_test.launch.py obstacle_ahead:=4.0       # 4 m 先に岩を置く（障害物検出の確認）
+  ros2 launch trc_bringup sim_test.launch.py obstacle_ahead:=6.0       # 6 m 先に岩を置く（手前で止まる）
+  ros2 launch trc_bringup sim_test.launch.py obstacle_ahead:=6.0 safety:=false  # 止めずに通り抜ける
 
 起動するもの:
-  - fake_sensors_node : 仮想フィールドの点群（/unilidar/cloud）・IMU・GNSS を出す
+  - scripted_driver   : 決まった道筋の速度指令を出す（直進 12 秒 → 左に曲がり続ける）
+  - safety_stop       : 前方に障害物があれば前進を止める（safety:=false で通り抜ける）
+  - fake_sensors_node : 速度指令どおりに動き、仮想フィールドの点群（/unilidar/cloud）・IMU・GNSS を出す
   - KISS-ICP          : 点群から LiDAR オドメトリ（/kiss/odometry）を作る
   - 位置推定一式       : 取付位置の TF + 2段の EKF + 向きの初期化（+ 制御履歴）
   - 障害物検出         : 点群から地面を除いて障害物を見つける（obstacles:=false で止める）
@@ -30,14 +33,18 @@
 """
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction
+from launch.actions import DeclareLaunchArgument, GroupAction, IncludeLaunchDescription, TimerAction
 from launch.conditions import IfCondition
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, PythonExpression
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
+    # 安全停止を使う = 障害物検出も安全停止も true
+    use_safety = PythonExpression(["'", LaunchConfiguration('obstacles'), "'.lower() == 'true' and '",
+                                   LaunchConfiguration('safety'), "'.lower() == 'true'"])
+    no_safety = PythonExpression(['not (', use_safety, ')'])
     return LaunchDescription([
         DeclareLaunchArgument('heading_deg', default_value='90.0',
                               description='にせのローバーのスタートの向き（東から反時計回り）'),
@@ -52,6 +59,8 @@ def generate_launch_description():
                               description='true で障害物検出を起動する'),
         DeclareLaunchArgument('obstacle_ahead', default_value='-1.0',
                               description='通り道のこの距離 [m] 先に岩を置く（障害物検出の試験用、-1 で置かない）'),
+        DeclareLaunchArgument('safety', default_value='true',
+                              description='true で、前方に障害物があるときに前進を止める（obstacles:=true のときだけ）'),
 
         IncludeLaunchDescription(
             PathJoinSubstitution([FindPackageShare('trc_bringup'), 'launch', 'localization.launch.py']),
@@ -63,10 +72,13 @@ def generate_launch_description():
         IncludeLaunchDescription(
             PathJoinSubstitution([FindPackageShare('trc_localization'), 'launch', 'lidar_odometry.launch.py']),
         ),
-        IncludeLaunchDescription(
-            PathJoinSubstitution([FindPackageShare('trc_bringup'), 'launch', 'perception.launch.py']),
-            condition=IfCondition(LaunchConfiguration('obstacles')),
-        ),
+        # scoped：読み込み先の引数（safety など）が、こちらの同じ名前の設定を上書きしないように
+        GroupAction(scoped=True, condition=IfCondition(LaunchConfiguration('obstacles')), actions=[
+            IncludeLaunchDescription(
+                PathJoinSubstitution([FindPackageShare('trc_bringup'), 'launch', 'perception.launch.py']),
+                launch_arguments={'safety': use_safety}.items(),
+            ),
+        ]),
         # 表示用：道筋と誤差
         Node(
             package='trc_localization', executable='path_publisher_node', name='localization_path',
@@ -85,10 +97,20 @@ def generate_launch_description():
         ),
         # TF（取付位置）と KISS-ICP がそろってから、にせのセンサを動かし始める
         TimerAction(period=3.0, actions=[
+            # 運転手：安全停止を使うときは /cmd_vel_nav に出し、safety_stop を通して /cmd_vel へ
+            Node(
+                package='trc_localization', executable='scripted_driver_node', name='scripted_driver',
+                remappings=[('cmd_vel', '/cmd_vel_nav')], condition=IfCondition(use_safety),
+            ),
+            Node(
+                package='trc_localization', executable='scripted_driver_node', name='scripted_driver',
+                remappings=[('cmd_vel', '/cmd_vel')], condition=IfCondition(no_safety),
+            ),
             Node(
                 package='trc_localization', executable='fake_sensors_node', name='fake_sensors',
                 parameters=[{
                     'publish_cloud': True,
+                    'drive_mode': 'cmd_vel',
                     'publish_odom': False,
                     'heading_deg': LaunchConfiguration('heading_deg'),
                     'gnss_outage_start': LaunchConfiguration('gnss_outage_start'),

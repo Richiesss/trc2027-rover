@@ -13,6 +13,8 @@
   /fake/world     sensor_msgs/PointCloud2 仮想フィールド全体（map 座標、表示用、10 秒ごと）
   /fake/truth_path nav_msgs/Path          本当に通った道筋（map 座標、表示用）
 
+drive_mode:=cmd_vel のときは /cmd_vel（geometry_msgs/Twist）の速度指令どおりに動く。
+
 あわせて /fake/truth（NavSatFix）に本当の位置を出すので、
 /gps/filtered（推定位置を緯度経度に戻したもの）と比べれば、推定の良し悪しが分かる。
 """
@@ -22,7 +24,7 @@ import random
 
 import numpy as np
 import rclpy
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, Twist
 from nav_msgs.msg import Odometry, Path
 from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.qos import DurabilityPolicy, QoSProfile
@@ -47,6 +49,10 @@ class FakeSensors(Node):
         self.speed = self.declare_parameter('speed', 0.5).value
         self.straight_time = self.declare_parameter('straight_time', 12.0).value
         self.turn_rate = self.declare_parameter('turn_rate', 0.15).value
+        # 動かし方：script = 決まった道筋（直進 straight_time 秒 → 一定の速さで左に曲がる）
+        #           cmd_vel = /cmd_vel の速度指令どおりに動く（cmd_timeout 秒来なければ止まる）
+        self.drive_mode = self.declare_parameter('drive_mode', 'script').value
+        self.cmd_timeout = float(self.declare_parameter('cmd_timeout', 0.5).value)
         self.lat0 = self.declare_parameter('lat0', 35.5400).value
         self.lon0 = self.declare_parameter('lon0', 134.2300).value
         self.sigma_gnss = self.declare_parameter('sigma_gnss', 0.02).value
@@ -95,10 +101,26 @@ class FakeSensors(Node):
         self.dt = 0.02
         self.tick = 0
         self.last_time = None
+        self.cmd = (0.0, 0.0)
+        self.cmd_time = None
+        if self.drive_mode == 'cmd_vel':
+            self.create_subscription(Twist, '/cmd_vel', self.on_cmd, 10)
+            self.get_logger().info('/cmd_vel の速度指令で動きます')
+        elif self.drive_mode != 'script':
+            raise ValueError(f'drive_mode は script か cmd_vel: {self.drive_mode}')
         self.create_timer(self.dt, self.step)
 
-    def yaw_rate(self):
-        return 0.0 if self.t < self.straight_time else self.turn_rate
+    def on_cmd(self, msg: Twist):
+        self.cmd = (msg.linear.x, msg.angular.z)
+        self.cmd_time = self.get_clock().now()
+
+    def velocity(self, now):
+        """いまの (前進の速さ [m/s], 回転の速さ [rad/s])。"""
+        if self.drive_mode == 'script':
+            return self.speed, (0.0 if self.t < self.straight_time else self.turn_rate)
+        if self.cmd_time is None or (now - self.cmd_time).nanoseconds * 1e-9 > self.cmd_timeout:
+            return 0.0, 0.0                          # 指令が途切れたら止まる
+        return self.cmd
 
     def step(self):
         # 実際に経った時間で進める（処理が遅い機体でも、動きと時刻が食い違わないように）
@@ -106,10 +128,10 @@ class FakeSensors(Node):
         dt = self.dt if self.last_time is None else (clock_now - self.last_time).nanoseconds * 1e-9
         dt = min(max(dt, 0.0), 0.1)
         self.last_time = clock_now
-        w = self.yaw_rate()
+        v, w = self.velocity(clock_now)
         self.yaw += w * dt
-        self.e += self.speed * math.cos(self.yaw) * dt
-        self.n += self.speed * math.sin(self.yaw) * dt
+        self.e += v * math.cos(self.yaw) * dt
+        self.n += v * math.sin(self.yaw) * dt
         self.t += dt
         self.tick += 1
         now = clock_now.to_msg()

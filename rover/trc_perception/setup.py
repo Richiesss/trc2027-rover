@@ -20,6 +20,7 @@ setup(
     entry_points={
         'console_scripts': [
             'obstacle_detector_node = trc_perception.obstacle_detector_node:main',
+            'safety_stop_node = trc_perception.safety_stop_node:main',
         ],
     },
 )

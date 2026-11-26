@@ -73,3 +73,10 @@ def test_fake_world_scans():
         false_rates.append(obs[len(o):].mean())
     assert min(recalls) > 0.95, recalls
     assert max(false_rates) < 0.01, false_rates
+
+
+def test_safety_filter():
+    from trc_perception.safety_stop_node import filter_command
+    assert filter_command(0.5, 0.1, blocked=True) == (0.0, 0.1, True)     # 前進は止め、回転は通す
+    assert filter_command(-0.3, 0.0, blocked=True) == (-0.3, 0.0, False)  # 後退は通す
+    assert filter_command(0.5, 0.1, blocked=False) == (0.5, 0.1, False)

@@ -7,6 +7,7 @@
   /obstacles/ground          sensor_msgs/PointCloud2  地面とみなした点（表示用、publish_ground）
   /obstacles/front_distance  std_msgs/Float32         前方の帯に入った障害物までの距離 [m]。なければ corridor_length
   /obstacles/stop            std_msgs/Bool            front_distance < stop_distance のとき true
+                                                      （一度 true になったら stop_distance + release_margin まで空くと false）
   /obstacles/corridor        visualization_msgs/Marker 前方の帯（緑：空いている／赤：止まるべき）
 
 いまは「見つけて知らせる」だけで、ローバーの動きは変えない（止める・避けるは走行制御側で使う）。
@@ -48,6 +49,8 @@ class ObstacleDetector(Node):
         self.corridor_length = float(self.declare_parameter('corridor_length', 5.0).value)
         self.front_offset = float(self.declare_parameter('front_offset', 0.4).value)
         self.stop_distance = float(self.declare_parameter('stop_distance', 1.5).value)
+        # 一度止まったら、stop_distance + release_margin より空くまで止めたままにする（ノイズでのばたつき防止）
+        self.release_margin = float(self.declare_parameter('release_margin', 0.3).value)
         self.publish_ground = bool(self.declare_parameter('publish_ground', True).value)
 
         self.tf_buffer = Buffer()
@@ -88,7 +91,8 @@ class ObstacleDetector(Node):
         obstacles = pts[obs_mask]
 
         dist = om.front_distance(obstacles, self.corridor_width, self.corridor_length, self.front_offset)
-        stop = dist < self.stop_distance
+        limit = self.stop_distance + (self.release_margin if self.was_stop else 0.0)
+        stop = dist < limit
         header = msg.header
         header.frame_id = self.base_frame
 

@@ -27,6 +27,7 @@ setup(
             'fake_sensors_node = trc_localization.fake_sensors_node:main',
             'path_publisher_node = trc_localization.path_publisher_node:main',
             'position_error_node = trc_localization.position_error_node:main',
+            'scripted_driver_node = trc_localization.scripted_driver_node:main',
         ],
     },
 )

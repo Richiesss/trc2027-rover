@@ -199,30 +199,51 @@ Mac のブラウザで [Foxglove](https://app.foxglove.dev)（無料アカウン
 
 画面が不要なときは `foxglove:=false` で bridge を起動しません。
 
-### 障害物を見つける
+### 障害物を見つけて止まる
 
-`sim_test` は障害物検出（`trc_perception/obstacle_detector_node`）も起動します。LiDAR の点群から地面を取り除き、残った点を障害物とみなします。
-**いまは「見つけて知らせる」だけで、ローバーの動きは変えません**（止める・避けるは走行制御で `/obstacles/stop` などを使う）。
+`sim_test` は障害物検出（`obstacle_detector_node`）と安全停止（`safety_stop_node`）も起動します。
+にせのローバーは速度指令（`/cmd_vel`）で動き、指令は次の順に流れます。
+
+```
+scripted_driver（決まった道筋：直進 12 秒 → 左に曲がり続ける）
+   │ /cmd_vel_nav
+   ▼
+safety_stop ◀── /obstacles/stop ── obstacle_detector ◀── /unilidar/cloud
+   │ /cmd_vel（前方に障害物があれば前進を 0 に。回転・後退は通す）
+   ▼
+fake_sensors（にせのローバー）
+```
 
 ```bash
-./scripts/sim_view.sh obstacle_ahead:=4.0     # 通り道の 4 m 先に岩を置く（にせのローバーは通り抜ける）
-ros2 topic echo /obstacles/front_distance     # 前方の障害物までの距離 [m]（何もなければ 5.0）
-ros2 topic echo /obstacles/stop               # 1.5 m 以内に入ると true
+./scripts/sim_view.sh obstacle_ahead:=6.0                 # 6 m 先に岩。手前で止まり、曲がる指令が来たら向きを変えて避ける
+./scripts/sim_view.sh obstacle_ahead:=6.0 safety:=false   # 止めずに通り抜ける（比べる用）
 ```
+
+6 m 先に岩を置いたときの動き（2026/11/26、開発環境）：
+
+| 時刻 | 動き |
+| --- | --- |
+| 0〜9 秒 | 直進。前方の距離が 0.5 m/s で縮む |
+| 約 9 秒 | 岩の 1.5 m 手前（ローバーは 3.7 m 進んだ所）で停止 |
+| 12 秒 | 運転手が「曲がれ」を出す → 前進は止めたまま、その場で向きを変える |
+| 約 15 秒 | 前方が 1.8 m 以上空いたので前進を再開。岩をよけて走り続ける |
 
 | トピック | 中身 |
 | --- | --- |
 | `/obstacles/points` | 障害物とみなした点（Foxglove では赤など目立つ色に） |
 | `/obstacles/ground` | 地面とみなした点 |
 | `/obstacles/corridor` | 前方の帯（幅 1 m・長さ 5 m）。緑：空いている／赤：止まるべき |
-| `/obstacles/front_distance` | 帯に入った障害物までの距離 [m] |
-| `/obstacles/stop` | `front_distance` < 1.5 m で true |
+| `/obstacles/front_distance` | 帯に入った障害物までの距離 [m]（何もなければ 5.0） |
+| `/obstacles/stop` | 1.5 m より近いと true。一度止まったら 1.8 m より空くまで true（ばたつき防止） |
+| `/safety/active` | 安全停止が前進を止めているとき true |
 
 地面の見分け方：水平面を 40 cm 四方のマスに分け、周りのマスの一番低い点から地面の高さを求めます（勾配 30 % までは坂として許す）。そこから 15 cm 以上高い点が障害物です。
-仮想フィールドでの結果（2026/11/26）：20 m 以内の障害物の点を 96 % 以上検出、地面を障害物と間違えたのは 0 %。処理は 1 回 数 ms。
+仮想フィールドでの結果：20 m 以内の障害物の点を 96 % 以上検出、地面を障害物と間違えたのは 0 %。処理は 1 回 数 ms。
 
-> 実機では、取付位置（URDF）が合っていないと地面が傾いて見えて誤検出が増えます。取付位置を測ったら URDF に入れること。
-> 本番の砂山や段差でしきい値（`height_threshold`、`max_slope`）を調整する必要があります。
+安全停止は、障害物の情報が 0.5 秒以上来ないときも前進を止めます（障害物検出が落ちたときに走り続けないように）。
+
+> 実機では、走行制御が `/cmd_vel_nav` に指令を出し、`perception.launch.py safety:=true` で `/cmd_vel`（モータ）へ渡す構成を想定しています。モータ側の担当と、トピック名を合わせること。
+> 取付位置（URDF）が合っていないと地面が傾いて見えて誤検出が増えます。本番の砂山や段差でしきい値（`height_threshold`、`max_slope`）の調整も必要です。
 
 ## 4. 実機のセンサを動かす
 
