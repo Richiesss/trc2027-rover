@@ -41,6 +41,20 @@ sudo rosdep init 2>/dev/null || true           # 2回目以降はエラーにな
 rosdep update
 ```
 
+**通信の範囲を決める（重要）**：何も設定しないと、ROS 2 は同じネットワーク（大学の LAN など）にいる他の機体のノードと自動でつながり、
+他人のロボットの `/gnss/fix` などが混ざります（実際に、別の機体の `/gnss_node` が見えて、試験結果がおかしくなったことがある）。
+チーム専用のドメイン ID を決め、開発中は同じ機体の中だけで通信するようにします。
+
+```bash
+echo 'export ROS_DOMAIN_ID=27' >> ~/.bashrc                      # チーム専用の番号（Docker の設定と同じ）
+echo 'export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST' >> ~/.bashrc  # 同じ機体の中だけでつながる
+source ~/.bashrc
+ros2 daemon stop
+```
+
+本番用 Jetson など、別の機体と通信させたいときは `ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET` にし、両方の機体で同じ `ROS_DOMAIN_ID` にします。
+`ros2 node list` に身に覚えのないノードが出たら、まずこの設定を確認してください（`ros2 node list --no-daemon` で、その時点で実際に見えているノードだけを表示できる）。
+
 GNSS をつなぐ機体では、シリアルポートの権限も付けておきます（反映には再ログイン）。
 
 ```bash
