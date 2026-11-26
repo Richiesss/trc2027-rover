@@ -41,6 +41,14 @@ def test_no_fix_and_garbage_return_none():
     assert nmea.parse_gga('not a sentence') is None
 
 
+def test_gga_quality_reports_no_fix():
+    assert nmea.gga_quality(with_checksum('GNGGA,031500.00,,,,,0,00,99.99,,,,,,')) == 0
+    assert nmea.gga_quality(
+        with_checksum('GNGGA,031500.00,3530.1,N,13945.6,E,4,24,0.6,10.0,M,36.7,M,1.0,0000')) == 4
+    assert nmea.gga_quality(with_checksum('GNRMC,031500.00,V,,,,,,,261126,,,N')) is None
+    assert nmea.gga_quality('$GNGGA,031500.00,,,,,0,00,99.99,,,,,,*00') is None   # チェックサム不一致
+
+
 def test_covariance_depends_on_quality():
     base = dict(utc='0', latitude=0.0, longitude=0.0, num_satellites=20,
                 altitude=0.0, geoid_separation=0.0)

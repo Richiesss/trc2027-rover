@@ -65,6 +65,20 @@ def _to_degrees(value: str, hemisphere: str, deg_digits: int) -> float:
     return result
 
 
+def gga_quality(sentence: str) -> Optional[int]:
+    """GGA センテンスの Fix quality だけを返す（測位できていない 0 も返す）。GGA でなければ None。"""
+    sentence = sentence.strip()
+    if not checksum_ok(sentence):
+        return None
+    fields = sentence[1:].split('*')[0].split(',')
+    if len(fields) < 7 or not fields[0].endswith('GGA'):
+        return None
+    try:
+        return int(fields[6]) if fields[6] else QUALITY_INVALID
+    except ValueError:
+        return None
+
+
 def parse_gga(sentence: str) -> Optional[GgaFix]:
     """GGA センテンスを解析する。GGA 以外・チェックサム不一致・測位なしは None を返す。
 

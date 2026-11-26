@@ -85,6 +85,12 @@ class GnssNode(Node):
             return
         fix = nmea.parse_gga(line)
         if fix is None:
+            # 受信機は動いているが、まだ測位できていない（屋内でアンテナが空を見られない など）
+            if nmea.gga_quality(line) == nmea.QUALITY_INVALID:
+                if self.last_quality != nmea.QUALITY_INVALID:
+                    self.get_logger().info('測位待ち（アンテナを空の見える場所に出してください）')
+                    self.last_quality = nmea.QUALITY_INVALID
+                self.quality_pub.publish(UInt8(data=nmea.QUALITY_INVALID))
             return
 
         if fix.quality != self.last_quality:
