@@ -21,7 +21,7 @@ from serial import Serial
 PORT = sys.argv[1] if len(sys.argv) > 1 else "/dev/ttyACM0"
 DURATION = float(sys.argv[2]) if len(sys.argv) > 2 else 20.0
 
-PORT_NAMES = {0x0000: "I2C", 0x0101: "UART1", 0x0201: "UART2", 0x0300: "USB", 0x0400: "SPI"}
+PORT_NAMES = {0x0000: "I2C", 0x0100: "UART1", 0x0201: "UART2", 0x0300: "USB", 0x0400: "SPI"}
 COR_PROTOCOL = {0: "不明", 1: "RTCM3", 2: "SPARTN", 29: "UBX-RXM-PMP", 30: "UBX-RXM-QZSSL6（CLAS）"}
 COR_USED = {0: "不明", 1: "使われていない", 2: "使われている"}
 COR_ERR = {0: "不明", 1: "エラーなし", 2: "エラーあり"}
@@ -40,11 +40,23 @@ def wait_for(identity, timeout=3.0):
     return None
 
 
-def uart2_rx(msg):
-    """MON-COMMS から UART2 の受信バイト数を取り出す。"""
+def port_rx(msg):
+    """MON-COMMS から、ポートごとの受信バイト数を {portId: rxBytes} で取り出す。"""
+    result = {}
     for i in range(1, msg.nPorts + 1):
-        if getattr(msg, f"portId_{i:02d}", None) == 0x0201:
-            return getattr(msg, f"rxBytes_{i:02d}", None)
+        pid = getattr(msg, f"portId_{i:02d}", None)
+        if pid is not None:
+            result[pid] = getattr(msg, f"rxBytes_{i:02d}", None)
+    return result
+
+
+def poll_comms():
+    """MON-COMMS を最大3回まで問い合わせる。"""
+    for _ in range(3):
+        ser.write(UBXMessage("MON", "MON-COMMS", POLL).serialize())
+        msg = wait_for("MON-COMMS", timeout=4.0)
+        if msg is not None:
+            return port_rx(msg)
     return None
 
 
@@ -69,9 +81,7 @@ else:
 
 # 2〜4. 一定時間ようすを見る
 set_outputs(1)
-ser.write(UBXMessage("MON", "MON-COMMS", POLL).serialize())
-first = wait_for("MON-COMMS")
-rx_start = uart2_rx(first) if first else None
+rx_start = poll_comms()
 
 print(f"\n{DURATION:.0f} 秒間ようすを見ます...")
 cor_count, cor_last, pvt_last = 0, None, None
@@ -86,17 +96,22 @@ while time.time() < end:
     elif msg.identity == "NAV-PVT":
         pvt_last = msg
 
-ser.write(UBXMessage("MON", "MON-COMMS", POLL).serialize())
-last = wait_for("MON-COMMS")
-rx_end = uart2_rx(last) if last else None
+rx_end = poll_comms()
 set_outputs(0)
 
 if rx_start is None or rx_end is None:
-    print("[2] UART2 の受信量を読めませんでした")
+    print("[2] UART2 の受信量を読めませんでした（MON-COMMS の応答なし）")
 else:
-    delta = rx_end - rx_start
-    verdict = "届いている" if delta > 0 else "何も届いていない（NEO-D9C の挿さり方・電源・アンテナを確認）"
-    print(f"[2] UART2 の受信: {DURATION:.0f} 秒で {delta} バイト → {verdict}")
+    for pid in sorted(rx_end):
+        name = PORT_NAMES.get(pid, hex(pid))
+        if rx_start.get(pid) is not None and rx_end[pid] is not None:
+            print(f"    {name:6s}: {DURATION:.0f} 秒で {rx_end[pid] - rx_start[pid]} バイト受信")
+    if 0x0201 in rx_end and rx_start.get(0x0201) is not None:
+        delta = rx_end[0x0201] - rx_start[0x0201]
+        verdict = "届いている" if delta > 0 else "何も届いていない（NEO-D9C の挿さり方・電源・アンテナを確認）"
+        print(f"[2] UART2（NEO-D9C）の受信: {delta} バイト → {verdict}")
+    else:
+        print(f"[2] UART2 が一覧にありません（見つかったポート: {[hex(p) for p in rx_end]}）")
 
 if cor_last is None:
     print("[3] 補強信号の受付（RXM-COR）: なし → ZED-F9P は補強信号を受け取っていない")
