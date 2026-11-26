@@ -3,11 +3,13 @@
   ros2 launch trc_bringup sim_test.launch.py
   ros2 launch trc_bringup sim_test.launch.py heading_deg:=200.0 log_history:=true
   ros2 launch trc_bringup sim_test.launch.py gnss_outage_start:=25.0   # 25 秒後から 10 秒間 GNSS を切る
-  ros2 launch trc_bringup sim_test.launch.py obstacle_ahead:=6.0       # 6 m 先に岩を置く（手前で止まる）
-  ros2 launch trc_bringup sim_test.launch.py obstacle_ahead:=6.0 safety:=false  # 止めずに通り抜ける
+  ros2 launch trc_bringup sim_test.launch.py obstacle_ahead:=6.0       # 6 m 先に岩を置く（よけて 18 m 先へ。途中の長い壁も回り込む）
+  ros2 launch trc_bringup sim_test.launch.py waypoints:="15,0; 15,10; 0,10; 0,0"   # 四角く回る
+  ros2 launch trc_bringup sim_test.launch.py driver:=script obstacle_ahead:=6.0      # 決まった道筋（手前で止まるだけ）
 
 起動するもの:
-  - scripted_driver   : 決まった道筋の速度指令を出す（直進 12 秒 → 左に曲がり続ける）
+  - local_planner     : 目標（waypoints）へ向かって、障害物をよけながら進む速度指令を出す（driver:=planner、既定）
+    scripted_driver   : 決まった道筋の速度指令を出す（直進 12 秒 → 左に曲がり続ける）（driver:=script）
   - safety_stop       : 前方に障害物があれば前進を止める（safety:=false で通り抜ける）
   - fake_sensors_node : 速度指令どおりに動き、仮想フィールドの点群（/unilidar/cloud）・IMU・GNSS を出す
   - KISS-ICP          : 点群から LiDAR オドメトリ（/kiss/odometry）を作る
@@ -44,7 +46,7 @@ def generate_launch_description():
     # 安全停止を使う = 障害物検出も安全停止も true
     use_safety = PythonExpression(["'", LaunchConfiguration('obstacles'), "'.lower() == 'true' and '",
                                    LaunchConfiguration('safety'), "'.lower() == 'true'"])
-    no_safety = PythonExpression(['not (', use_safety, ')'])
+    cmd_topic = PythonExpression(["'/cmd_vel_nav' if (", use_safety, ") else '/cmd_vel'"])
     return LaunchDescription([
         DeclareLaunchArgument('heading_deg', default_value='90.0',
                               description='にせのローバーのスタートの向き（東から反時計回り）'),
@@ -59,6 +61,10 @@ def generate_launch_description():
                               description='true で障害物検出を起動する'),
         DeclareLaunchArgument('obstacle_ahead', default_value='-1.0',
                               description='通り道のこの距離 [m] 先に岩を置く（障害物検出の試験用、-1 で置かない）'),
+        DeclareLaunchArgument('driver', default_value='planner',
+                              description='planner：目標へ向かって障害物をよける／script：決まった道筋（直進→左に曲がり続ける）'),
+        DeclareLaunchArgument('waypoints', default_value='18,0',
+                              description='driver:=planner の目標（map 座標、スタート地点が原点・x が前）。例 "15,0; 15,8"'),
         DeclareLaunchArgument('safety', default_value='true',
                               description='true で、前方に障害物があるときに前進を止める（obstacles:=true のときだけ）'),
 
@@ -97,14 +103,18 @@ def generate_launch_description():
         ),
         # TF（取付位置）と KISS-ICP がそろってから、にせのセンサを動かし始める
         TimerAction(period=3.0, actions=[
-            # 運転手：安全停止を使うときは /cmd_vel_nav に出し、safety_stop を通して /cmd_vel へ
+            # 運転手：planner（目標へ向かって障害物をよける）か script（決まった道筋）。
+            # 安全停止を使うときは /cmd_vel_nav に出し、safety_stop を通して /cmd_vel へ
             Node(
-                package='trc_localization', executable='scripted_driver_node', name='scripted_driver',
-                remappings=[('cmd_vel', '/cmd_vel_nav')], condition=IfCondition(use_safety),
+                package='trc_navigation', executable='local_planner_node', name='local_planner',
+                parameters=[{'waypoints': LaunchConfiguration('waypoints')}],
+                remappings=[('cmd_vel', cmd_topic)],
+                condition=IfCondition(PythonExpression(["'", LaunchConfiguration('driver'), "' == 'planner'"])),
             ),
             Node(
                 package='trc_localization', executable='scripted_driver_node', name='scripted_driver',
-                remappings=[('cmd_vel', '/cmd_vel')], condition=IfCondition(no_safety),
+                remappings=[('cmd_vel', cmd_topic)],
+                condition=IfCondition(PythonExpression(["'", LaunchConfiguration('driver'), "' == 'script'"])),
             ),
             Node(
                 package='trc_localization', executable='fake_sensors_node', name='fake_sensors',

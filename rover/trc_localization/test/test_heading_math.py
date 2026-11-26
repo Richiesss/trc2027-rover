@@ -45,3 +45,12 @@ def test_quaternion_roundtrip():
     for deg in (-170, -90, 0, 45, 179):
         yaw = math.radians(deg)
         assert hm.yaw_from_quaternion(*hm.quaternion_from_yaw(yaw)) == pytest.approx(yaw)
+
+
+def test_body_velocity():
+    import math
+    from trc_localization.odom_to_twist_node import body_velocity
+    # 北（+y）を向いて北へ 0.5 m 進み、左に 0.1 rad 回った（0.1 秒）
+    vx, vy, w, dt = body_velocity((0.0, 0.0, 0.0, math.pi / 2), (0.1, 0.0, 0.05, math.pi / 2 + 0.01))
+    assert abs(vx - 0.5) < 1e-9 and abs(vy) < 1e-9 and abs(w - 0.1) < 1e-9 and abs(dt - 0.1) < 1e-12
+    assert body_velocity((1.0, 0, 0, 0), (1.0, 1, 0, 0)) is None
