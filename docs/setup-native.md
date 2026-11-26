@@ -151,6 +151,21 @@ ros2 launch trc_bringup sim_test.launch.py gnss_outage_start:=25.0 gnss_outage_d
 
 `sim_test.launch.py` は `foxglove_bridge`（ポート 8765）も起動します。trc-dev に画面がなくても、Mac のブラウザで 3D 表示できます。
 
+スクリプトを使うと、前回のノードの止め忘れ確認・環境の読み込み・ログ保存（`~/trc2027/logs/sim_<日時>.log`）までまとめて行います。
+
+```bash
+# trc-dev
+./scripts/sim_view.sh                           # launch の引数もそのまま渡せる（例: gnss_outage_start:=25.0）
+./scripts/sim_view.sh --stop                    # 残っているノードを止めるだけ
+
+# Mac（リポジトリを clone した場所で）
+./scripts/foxglove_tunnel.sh                    # ポート転送して Foxglove を開く
+```
+
+> 前回の `sim_test` などが別のターミナルで動いたままだと、古い TF が混ざって推定が NaN になります。`sim_view.sh` は起動前にこれを見つけて止めます。
+
+手で行う場合：
+
 ```bash
 # trc-dev（初回のみ）
 sudo apt install ros-jazzy-foxglove-bridge
