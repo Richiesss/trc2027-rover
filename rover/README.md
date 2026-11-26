@@ -7,6 +7,7 @@
 | --- | --- |
 | `trc_gnss` | simpleRTK2B の NMEA → `/gnss/fix`（RTK の状態で共分散を切り替え） |
 | `trc_localization` | robot_localization の設定（2段の EKF + navsat_transform）、向きの初期化 `heading_init`、試験用の `fake_sensors_node` |
+| `trc_logging` | 大会提出用の制御履歴（CSV）を記録 |
 | `trc_description` | センサの取付位置（URDF / TF）。値は仮 |
 | `trc_bringup` | 起動用の launch（`sensors` / `localization` / `record`） |
 
