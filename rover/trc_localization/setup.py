@@ -25,6 +25,8 @@ setup(
         'console_scripts': [
             'heading_init_node = trc_localization.heading_init_node:main',
             'fake_sensors_node = trc_localization.fake_sensors_node:main',
+            'path_publisher_node = trc_localization.path_publisher_node:main',
+            'position_error_node = trc_localization.position_error_node:main',
         ],
     },
 )
