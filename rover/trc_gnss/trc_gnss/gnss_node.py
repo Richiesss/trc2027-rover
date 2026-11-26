@@ -10,6 +10,7 @@ RTK Fix のときは小さく、単独測位のときは大きくしておくこ
 
 import serial
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from sensor_msgs.msg import NavSatFix, NavSatStatus
 from std_msgs.msg import UInt8
@@ -119,7 +120,7 @@ def main(args=None):
     node = GnssNode()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):   # Ctrl+C で正常終了する
         pass
     finally:
         node.destroy_node()
