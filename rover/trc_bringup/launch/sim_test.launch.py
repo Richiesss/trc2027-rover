@@ -3,17 +3,19 @@
   ros2 launch trc_bringup sim_test.launch.py
   ros2 launch trc_bringup sim_test.launch.py heading_deg:=200.0 log_history:=true
   ros2 launch trc_bringup sim_test.launch.py gnss_outage_start:=25.0   # 25 秒後から 10 秒間 GNSS を切る
+  ros2 launch trc_bringup sim_test.launch.py obstacle_ahead:=4.0       # 4 m 先に岩を置く（障害物検出の確認）
 
 起動するもの:
   - fake_sensors_node : 仮想フィールドの点群（/unilidar/cloud）・IMU・GNSS を出す
   - KISS-ICP          : 点群から LiDAR オドメトリ（/kiss/odometry）を作る
   - 位置推定一式       : 取付位置の TF + 2段の EKF + 向きの初期化（+ 制御履歴）
+  - 障害物検出         : 点群から地面を除いて障害物を見つける（obstacles:=false で止める）
 
 結果の見方:
   /gps/filtered（推定位置）と /fake/truth（本当の位置）を比べる
 
 画面で見る（foxglove:=true、既定）:
-  foxglove_bridge（WebSocket、ポート 8765）を起動する。Mac のブラウザで Lichtblick を開いてつなぐ
+  foxglove_bridge（WebSocket、ポート 8765）を起動する。Mac のブラウザで Foxglove を開いてつなぐ
   （手順は docs/setup-native.md の「シミュレーションを画面で見る」）
   表示用に次のトピックも出す:
     /fake/world          仮想フィールド全体（map 座標）
@@ -21,6 +23,10 @@
     /localization/path   推定した道筋（/odometry/global から）
     /gnss/path           GNSS の測定点（/odometry/gps から）
     /fake/position_error 推定位置の誤差 [m]
+    /obstacles/points    障害物とみなした点（base_link 座標）
+    /obstacles/ground    地面とみなした点
+    /obstacles/corridor  前方の帯（緑：空いている／赤：止まるべき）
+    /obstacles/front_distance  前方の障害物までの距離 [m]
 """
 
 from launch import LaunchDescription
@@ -42,6 +48,10 @@ def generate_launch_description():
         DeclareLaunchArgument('foxglove', default_value='true',
                               description='true で foxglove_bridge を起動し、ブラウザで表示できるようにする'),
         DeclareLaunchArgument('foxglove_port', default_value='8765'),
+        DeclareLaunchArgument('obstacles', default_value='true',
+                              description='true で障害物検出を起動する'),
+        DeclareLaunchArgument('obstacle_ahead', default_value='-1.0',
+                              description='通り道のこの距離 [m] 先に岩を置く（障害物検出の試験用、-1 で置かない）'),
 
         IncludeLaunchDescription(
             PathJoinSubstitution([FindPackageShare('trc_bringup'), 'launch', 'localization.launch.py']),
@@ -52,6 +62,10 @@ def generate_launch_description():
         ),
         IncludeLaunchDescription(
             PathJoinSubstitution([FindPackageShare('trc_localization'), 'launch', 'lidar_odometry.launch.py']),
+        ),
+        IncludeLaunchDescription(
+            PathJoinSubstitution([FindPackageShare('trc_bringup'), 'launch', 'perception.launch.py']),
+            condition=IfCondition(LaunchConfiguration('obstacles')),
         ),
         # 表示用：道筋と誤差
         Node(
@@ -79,6 +93,7 @@ def generate_launch_description():
                     'heading_deg': LaunchConfiguration('heading_deg'),
                     'gnss_outage_start': LaunchConfiguration('gnss_outage_start'),
                     'gnss_outage_duration': LaunchConfiguration('gnss_outage_duration'),
+                    'obstacle_ahead': LaunchConfiguration('obstacle_ahead'),
                 }],
             ),
         ]),

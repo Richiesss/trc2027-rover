@@ -60,6 +60,8 @@ class FakeSensors(Node):
         self.cloud_points = self.declare_parameter('cloud_points', 8000).value
         self.cloud_noise = self.declare_parameter('cloud_noise', 0.02).value
         self.cloud_ground = self.declare_parameter('cloud_ground', True).value
+        # 障害物検出の試験用：スタートの向きにこの距離 [m] 進んだ所に岩を置く（負なら置かない）
+        self.obstacle_ahead = float(self.declare_parameter('obstacle_ahead', -1.0, any_number).value)
 
         self.odom_pub = self.create_publisher(Odometry, '/lidar/odom', 10)
         self.imu_pub = self.create_publisher(Imu, '/unilidar/imu', 10)
@@ -77,6 +79,11 @@ class FakeSensors(Node):
         if self.publish_cloud:
             self.rng = np.random.default_rng(0)
             self.world = fake_world.make_world(seed=0)
+            if self.obstacle_ahead > 0.0:
+                d = self.obstacle_ahead
+                rock = fake_world.make_rock(d * math.cos(self.heading0), d * math.sin(self.heading0))
+                self.world = np.vstack([self.world, rock])
+                self.get_logger().info(f'通り道の {d:.1f} m 先に岩を置きました（ローバーは通り抜けます）')
             self.ground = fake_world.make_ground(seed=0) if self.cloud_ground else np.empty((0, 3))
             self.get_logger().info(f'仮想フィールドを作りました（{len(self.world)} 点）')
             self.publish_world()

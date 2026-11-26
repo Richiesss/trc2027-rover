@@ -46,6 +46,7 @@ source install/setup.bash
 | `trc_gnss` | GNSS（simpleRTK2B）の位置を配信。RTK の状態で誤差の見積もりを切り替える |
 | `trc_localization` | GNSS と LiDAR オドメトリを融合した位置推定（robot_localization）と向きの初期化 |
 | `trc_logging` | 大会提出用の制御履歴（時刻・位置・方位・制御指令）を CSV に記録 |
+| `trc_perception` | LiDAR の点群から地面を除いて障害物を検出し、前方の距離と停止信号を出す |
 | `trc_description` | センサの取付位置（TF） |
 | `trc_bringup` | 起動用の launch と、rosbag の記録 |
 

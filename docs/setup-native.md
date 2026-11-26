@@ -13,6 +13,7 @@ Ubuntu 24.04 の PC でも同じ手順で使えます。
 | `trc_localization` | robot_localization（2段の EKF + navsat_transform）の設定と、向きの初期化ノード `heading_init`、実機なしで試すための `fake_sensors_node` |
 | `trc_description` | センサの取付位置（URDF / TF）。**値は仮なので、機体ができたら実測して書き換える** |
 | `trc_logging` | 大会提出用の制御履歴（時刻・位置・方位・制御指令）を CSV に記録する `control_history_node` |
+| `trc_perception` | LiDAR の点群から地面を除いて障害物を検出する `obstacle_detector_node` |
 | `trc_bringup` | 起動用の launch（センサ、位置推定、rosbag の記録） |
 
 ```
@@ -197,6 +198,31 @@ Mac のブラウザで [Foxglove](https://app.foxglove.dev)（無料アカウン
 - `gnss_outage_start:=25.0` で起動すると、`/gnss/path` が途切れても `/localization/path` が本当の軌跡に沿って伸び続ける
 
 画面が不要なときは `foxglove:=false` で bridge を起動しません。
+
+### 障害物を見つける
+
+`sim_test` は障害物検出（`trc_perception/obstacle_detector_node`）も起動します。LiDAR の点群から地面を取り除き、残った点を障害物とみなします。
+**いまは「見つけて知らせる」だけで、ローバーの動きは変えません**（止める・避けるは走行制御で `/obstacles/stop` などを使う）。
+
+```bash
+./scripts/sim_view.sh obstacle_ahead:=4.0     # 通り道の 4 m 先に岩を置く（にせのローバーは通り抜ける）
+ros2 topic echo /obstacles/front_distance     # 前方の障害物までの距離 [m]（何もなければ 5.0）
+ros2 topic echo /obstacles/stop               # 1.5 m 以内に入ると true
+```
+
+| トピック | 中身 |
+| --- | --- |
+| `/obstacles/points` | 障害物とみなした点（Foxglove では赤など目立つ色に） |
+| `/obstacles/ground` | 地面とみなした点 |
+| `/obstacles/corridor` | 前方の帯（幅 1 m・長さ 5 m）。緑：空いている／赤：止まるべき |
+| `/obstacles/front_distance` | 帯に入った障害物までの距離 [m] |
+| `/obstacles/stop` | `front_distance` < 1.5 m で true |
+
+地面の見分け方：水平面を 40 cm 四方のマスに分け、周りのマスの一番低い点から地面の高さを求めます（勾配 30 % までは坂として許す）。そこから 15 cm 以上高い点が障害物です。
+仮想フィールドでの結果（2026/11/26）：20 m 以内の障害物の点を 96 % 以上検出、地面を障害物と間違えたのは 0 %。処理は 1 回 数 ms。
+
+> 実機では、取付位置（URDF）が合っていないと地面が傾いて見えて誤検出が増えます。取付位置を測ったら URDF に入れること。
+> 本番の砂山や段差でしきい値（`height_threshold`、`max_slope`）を調整する必要があります。
 
 ## 4. 実機のセンサを動かす
 
