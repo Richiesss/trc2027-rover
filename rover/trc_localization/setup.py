@@ -29,6 +29,7 @@ setup(
             'position_error_node = trc_localization.position_error_node:main',
             'scripted_driver_node = trc_localization.scripted_driver_node:main',
             'odom_to_twist_node = trc_localization.odom_to_twist_node:main',
+            'gnss_adapter_node = trc_localization.gnss_adapter_node:main',
         ],
     },
 )

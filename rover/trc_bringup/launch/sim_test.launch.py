@@ -70,7 +70,7 @@ def generate_launch_description():
         DeclareLaunchArgument('layout', default_value='default',
                               description='障害物の配置: default / gap / narrow / dead_end / clutter（目標は 14,0 を想定）'),
         DeclareLaunchArgument('gnss_events', default_value='',
-                              description='GNSS の劣化 "開始秒:続く秒:種類; ..."（種類 outage / float / single）'),
+                              description='GNSS の劣化 "開始秒:続く秒:種類; ..."（種類 outage / float / single / nocov＝精度不明の単独測位）'),
         DeclareLaunchArgument('gnss_jump', default_value='',
                               description='GNSS が RTK Fix のふりをして 1 回だけ跳ぶ "秒:距離m"'),
         DeclareLaunchArgument('lidar_drop', default_value='',

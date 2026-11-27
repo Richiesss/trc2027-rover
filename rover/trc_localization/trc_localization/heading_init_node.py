@@ -10,7 +10,7 @@ robot_localization の navsat_transform はこの向きを使って、GNSS の�
  向きが求まるまでは GNSS が地図に入らない）。
 
 購読:
-  gnss/fix       sensor_msgs/NavSatFix   trc_gnss の出力
+  gnss/fix       sensor_msgs/NavSatFix   GNSS の測位（launch で /gnss/checked につなぐ）
   odometry       nav_msgs/Odometry        EKF の出力（既定は /odometry/global）
 配信:
   heading/imu    sensor_msgs/Imu          ENU 基準の向き（orientation だけ有効）

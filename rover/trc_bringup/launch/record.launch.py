@@ -16,8 +16,13 @@ from launch.substitutions import LaunchConfiguration
 TOPICS = [
     '/unilidar/cloud',
     '/unilidar/imu',
-    '/gnss/fix',
-    '/gnss/quality',
+    '/gnss',                  # gnss_fix：RTK Fix 以外
+    '/gnss/fix',              # gnss_fix：RTK Fix
+    '/gnss/clas',             # gnss_fix：CLAS で RTK Fix
+    '/gnss/best',             # gnss_fix：有効な測位すべて
+    '/gnss/velocity',
+    '/gnss/time_reference',
+    '/diagnostics',           # gnss_fix の受信機の状態
     '/tf_static',
 ]
 

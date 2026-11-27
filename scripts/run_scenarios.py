@@ -52,6 +52,8 @@ SCENARIOS = [
              max_pos_err=1.0),
     Scenario('gnss_single', 'GNSS が 10 秒後から 30 秒 単独測位（誤差 2.5 m）', {'gnss_events': '10:30:single'},
              max_pos_err=3.0),
+    Scenario('gnss_nocov', 'GNSS が 10 秒後から 30 秒 精度不明の単独測位（GGA だけ・共分散 0）',
+             {'gnss_events': '10:30:nocov'}, max_pos_err=3.0),
     Scenario('gnss_jump', 'GNSS が 25 秒後に 1 回だけ 5 m 跳ぶ（RTK Fix のふり）', {'gnss_jump': '25:5'},
              max_pos_err=1.0),
     Scenario('lidar_drop', 'LiDAR が 20 秒後から 3 秒止まる', {'lidar_drop': '20:3'}),
