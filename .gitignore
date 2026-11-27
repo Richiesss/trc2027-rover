@@ -23,3 +23,6 @@ log/
 logs/*
 !logs/.gitkeep
 .pytest_cache/
+
+# ミッションの対応表の例は残す（ログの csv は無視したまま）
+!rover/trc_bringup/config/missions/*.csv
