@@ -9,7 +9,7 @@ Ubuntu 24.04 の PC でも同じ手順で使えます。
 
 | パッケージ | 役割 |
 | --- | --- |
-| `trc_gnss` | simpleRTK2B の NMEA を読み、`/gnss/fix`（NavSatFix）を配信。RTK の状態（Fix / Float / 単独）で共分散を切り替える |
+| `trc_gnss` | 受信機の設定スクリプト（`sandbox/gnss/` の測位周期・CLAS の確認）と、前に使っていた簡易 GNSS ノード。GNSS のドライバは大塚さんの [gnss_fix](https://github.com/tikutikuwa/gnss_fix) に置き換えた |
 | `trc_localization` | robot_localization（2段の EKF + navsat_transform）の設定と、向きの初期化ノード `heading_init`、実機なしで試すための `fake_sensors_node` |
 | `trc_description` | センサの取付位置（URDF / TF）。**値は仮なので、機体ができたら実測して書き換える** |
 | `trc_logging` | 大会提出用の制御履歴（時刻・位置・方位・制御指令）を CSV に記録する `control_history_node` |
@@ -23,7 +23,7 @@ L2 ─► unilidar_sdk2 ─► /unilidar/cloud, /unilidar/imu
                               ▼
                     LiDARオドメトリ（KISS-ICP など）─► /lidar/odom ─┐
                                                                     ▼
-simpleRTK2B ─► trc_gnss ─► /gnss/fix ─► heading_init ─► navsat_transform ─► ekf_map ─► /odometry/global
+simpleRTK2B ─► gnss_fix ─► /gnss, /gnss/fix, /gnss/clas ─► gnss_adapter ─► /gnss/checked ─► heading_init ─► navsat_transform ─► ekf_map ─► /odometry/global
                                                                     ▲                      （map 座標の位置）
                                          /unilidar/imu ─► ekf_odom ─┘ ─► /odometry/local
 ```
@@ -316,11 +316,37 @@ GNSS の劣化、LiDAR の途切れ、狭いすき間や袋小路などを順に
 
 ## 4. 実機のセンサを動かす
 
-### GNSS
+### GNSS（大塚さんの gnss_fix）
+
+GNSS のドライバは [gnss_fix](https://github.com/tikutikuwa/gnss_fix) を使います。KISS-ICP と同じ `~/trc2027/deps_ws` に置きます。
 
 ```bash
-ros2 launch trc_bringup sensors.launch.py gnss_port:=/dev/ttyACM0
-ros2 topic echo /gnss/quality      # 4 = RTK Fix、5 = RTK Float、1 = 単独測位
+cd ~/trc2027/deps_ws/src && git clone https://github.com/tikutikuwa/gnss_fix.git
+cd ~/trc2027/deps_ws && rosdep install --from-paths src/gnss_fix --ignore-src -r -y
+colcon build --symlink-install --packages-select gnss_fix --cmake-args -DCMAKE_BUILD_TYPE=Release
+```
+
+受信機の事前設定（測位周期・CLAS の補正の経路）は gnss_fix の README を参照。
+
+```bash
+ros2 launch trc_bringup sensors.launch.py                          # ポートは gnss_fix の既定（/dev/serial/by-id/ の u-blox）
+ros2 launch trc_bringup sensors.launch.py gnss_port:=/dev/ttyACM0  # ポートを指定するとき
+ros2 topic echo /gnss/best --once                                   # gnss_fix の出力（有効な測位）
+```
+
+gnss_fix は測位の状態でトピックを分けて出します（`/gnss` = RTK Fix 以外、`/gnss/fix` = RTK Fix、`/gnss/clas` = CLAS で RTK Fix、`/gnss/best` = 有効なものすべて）。
+位置推定は `gnss_adapter_node`（localization.launch.py が起動）を通して使います。
+
+| gnss_adapter_node がすること | 理由 |
+| --- | --- |
+| 精度（共分散）が不明・0 のときは、RTK Fix 5 cm / Float 50 cm / DGPS 1.5 m / 単独 3 m とみなす | 0 のまま EKF に入れると「完全に正確」と扱われる。向きの初期化が単独測位を RTK と取り違える |
+| 精度が 1 cm より小さければ 1 cm にする | 受信機が楽観的すぎるときの保険 |
+| `frame_id` を `gnss_link` にそろえる | URDF のアンテナの取付位置を使うため（gnss_fix の既定は `gps_link`） |
+| どのトピックに届いたかから `/gnss/quality` を作る（4 RTK Fix / 5 Float / 2 DGPS / 1 単独 / 0 未測位） | 制御履歴（CSV）の `gnss_quality` 列 |
+
+```bash
+ros2 launch trc_bringup localization.launch.py   # 別のターミナルで
+ros2 topic echo /gnss/quality                     # 4 = RTK Fix、5 = RTK Float、1 = 単独測位
 ```
 
 ### LiDAR（ドライバと LiDAR オドメトリ）
@@ -336,7 +362,10 @@ rosdep install --from-paths src --ignore-src -y
 colcon build --symlink-install
 ```
 
-- unilidar_sdk2 の ROS 2 パッケージの場所や、LiDAR の IP の設定方法は、リポジトリの README を確認してください（点群は `/unilidar/cloud`、IMU は `/unilidar/imu` が初期値）。
+- unilidar_sdk2 の ROS 2 パッケージの場所や設定方法は、リポジトリの README を確認してください（点群は `/unilidar/cloud`、IMU は `/unilidar/imu` が初期値）。
+- **L2 は USB（シリアル）でつなぐ**：Jetson の Ethernet ポートは通信系統で使う可能性があるので空けておく。
+  L2 は工場出荷時は Ethernet（UDP）モードなので、一度だけシリアルモードに切り替える（work mode を 8 にする。切り替えには一度 Ethernet でつなぐか、Windows の Unilidar 2 で付属の転送モジュール経由で設定する）。
+  切り替えたら、ドライバの設定でシリアルを選び、ポート（`ls /dev/ttyUSB* /dev/ttyACM*` で確認）を指定する。
 - KISS-ICP は apt では入らないので、ソースからビルドします（依存ライブラリはビルド中に自動でダウンロードされる。初回は数分かかる）。
 - 毎回使うなら `~/.bashrc` に追加しておきます：`echo 'source ~/trc2027/deps_ws/install/setup.bash' >> ~/.bashrc`（trc2027-rover の行より**前**に書く）
 
@@ -407,7 +436,7 @@ LiDAR オドメトリも `use_sim_time:=true` で起動してください。
 ## これからやること（TODO）
 
 - [ ] `trc_description` の取付位置を実測して書き換える
-- [ ] 実データで `trc_gnss` の誤差（`sigma_*`）を調整する
+- [ ] 実データで gnss_fix の共分散（受信機の NAV-COV）が実際の誤差と合っているか確かめる
 - [ ] 坂（登坂ゾーン）を走るなら `two_d_mode` を見直す
 - [ ] Jetson で EKF が `Failed to meet update rate` を出す場合は、`ekf.yaml` の `frequency` を 20 などに下げる
 - [ ] 点群から障害物・路面を推定するノード

@@ -5,7 +5,7 @@
 
 | パッケージ | 役割 |
 | --- | --- |
-| `trc_gnss` | simpleRTK2B の NMEA → `/gnss/fix`（RTK の状態で共分散を切り替え） |
+| `trc_gnss` | GNSS 受信機の設定スクリプト（ドライバは gnss_fix に置き換え） |
 | `trc_localization` | robot_localization の設定（2段の EKF + navsat_transform）、向きの初期化 `heading_init`、KISS-ICP の起動設定、試験用の `fake_sensors_node`（ダミーの点群も出せる） |
 | `trc_logging` | 大会提出用の制御履歴（CSV）を記録 |
 | `trc_perception` | LiDAR の点群から地面を除いて障害物を検出、前方が塞がったら前進を止める |

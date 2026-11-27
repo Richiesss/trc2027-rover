@@ -43,7 +43,7 @@ source install/setup.bash
 
 | パッケージ（`rover/`） | 役割 |
 | --- | --- |
-| `trc_gnss` | GNSS（simpleRTK2B）の位置を配信。RTK の状態で誤差の見積もりを切り替える |
+| `trc_gnss` | GNSS 受信機の設定スクリプト（ドライバは大塚さんの [gnss_fix](https://github.com/tikutikuwa/gnss_fix) を使う） |
 | `trc_localization` | GNSS と LiDAR オドメトリを融合した位置推定（robot_localization）と向きの初期化 |
 | `trc_logging` | 大会提出用の制御履歴（時刻・位置・方位・制御指令）を CSV に記録 |
 | `trc_perception` | LiDAR の点群から地面を除いて障害物を検出し、前方が塞がったら前進を止める |
@@ -66,8 +66,8 @@ JetPack 6（Ubuntu 22.04）の機体で Jazzy を使う場合は、Docker の手
 | 役割 | 部品 | 接続 |
 | --- | --- | --- |
 | 計算機 | Jetson Orin Nano 8GB | — |
-| LiDAR | Unitree 4D LiDAR L2 | 有線LAN（LiDAR 192.168.1.62 → Jetson 192.168.1.2、UDP 6101→6201） |
-| GNSS | ArduSimple simpleRTK2B（ZED-F9P）+ NEO-D9C（みちびきCLAS）+ u-blox ANN-MB2 | USB（/dev/ttyACM0） |
+| LiDAR | Unitree 4D LiDAR L2 | USB（付属の UART 転送モジュール経由のシリアル）。**Jetson の Ethernet は通信系統用に空けておく** |
+| GNSS | ArduSimple simpleRTK2B（ZED-F9P）+ NEO-D9C（みちびきCLAS）+ u-blox ANN-MB2 | USB（/dev/ttyACM0）。ドライバは [gnss_fix](https://github.com/tikutikuwa/gnss_fix) |
 | モータードライバ | RoboClaw 2x15A（検討中） | USB / シリアル |
 | モーター | goBILDA 5303 Saturn 188:1 ×2（検討中） | RoboClaw経由 |
 

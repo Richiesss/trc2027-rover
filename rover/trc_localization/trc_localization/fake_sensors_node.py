@@ -8,8 +8,10 @@
                                           支柱・岩・砂山を置いた仮想フィールドを、ローバーから見た点群。
                                           KISS-ICP などの LiDAR オドメトリに入力して試せる
   /unilidar/imu   sensor_msgs/Imu        回転の速さだけ
-  /gnss/fix       sensor_msgs/NavSatFix  RTK Fix 相当（誤差 sigma_gnss）
-  /gnss/quality   std_msgs/UInt8         4（RTK Fix）
+  /gnss/fix       sensor_msgs/NavSatFix  RTK Fix のとき（誤差 sigma_gnss）。大塚さんの gnss_fix と同じ分け方
+  /gnss           sensor_msgs/NavSatFix  RTK Fix 以外（Float・単独測位・未測位）
+  /gnss/best      sensor_msgs/NavSatFix  有効な測位すべて
+  （/gnss/quality は gnss_adapter_node が作る）
   /fake/world     sensor_msgs/PointCloud2 仮想フィールド全体（map 座標、表示用、10 秒ごと）
   /fake/truth_path nav_msgs/Path          本当に通った道筋（map 座標、表示用）
 
@@ -31,7 +33,6 @@ from rclpy.qos import DurabilityPolicy, QoSProfile
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from sensor_msgs.msg import Imu, NavSatFix, NavSatStatus, PointCloud2, PointField
-from std_msgs.msg import UInt8
 
 from trc_localization import fake_world
 from trc_localization import heading_math as hm
@@ -46,7 +47,7 @@ def parse_events(text: str, default_kind: str = None):
             continue
         f = [v.strip() for v in part.split(':')]
         kind = f[2] if len(f) > 2 else default_kind
-        if kind not in ('outage', 'float', 'single', 'drop'):
+        if kind not in ('outage', 'float', 'single', 'nocov', 'drop'):
             raise ValueError(f'トラブルの種類が分かりません: {part}')
         out.append((float(f[0]), float(f[1]), kind))
     return out
@@ -95,7 +96,7 @@ class FakeSensors(Node):
         # --- 試験用のトラブル（シナリオ試験で使う。すべて既定では起きない）---
         # 障害物の配置：default / gap / narrow / dead_end / clutter（fake_world.make_layout）
         self.layout = self.declare_parameter('layout', 'default').value
-        # GNSS の劣化 "開始秒:続く秒:種類; ..."。種類は outage（途切れ）/ float（RTK Float）/ single（単独測位）
+        # GNSS の劣化 "開始秒:続く秒:種類; ..."。種類は outage（途切れ）/ float（RTK Float）/ single（単独測位）/ nocov（精度不明の単独測位）
         self.gnss_events = parse_events(self.declare_parameter('gnss_events', '').value)
         # GNSS が RTK Fix のふりをして 1 回だけ跳ぶ（マルチパス）。"秒:距離[m]"
         self.gnss_jump = parse_jump(self.declare_parameter('gnss_jump', '').value)
@@ -106,8 +107,10 @@ class FakeSensors(Node):
 
         self.odom_pub = self.create_publisher(Odometry, '/lidar/odom', 10)
         self.imu_pub = self.create_publisher(Imu, '/unilidar/imu', 10)
-        self.gnss_pub = self.create_publisher(NavSatFix, '/gnss/fix', 10)
-        self.quality_pub = self.create_publisher(UInt8, '/gnss/quality', 10)
+        # gnss_fix と同じ分け方で出す（/gnss/fix = RTK Fix、/gnss = それ以外、/gnss/best = 有効なものすべて）
+        self.gnss_fixed_pub = self.create_publisher(NavSatFix, '/gnss/fix', 10)
+        self.gnss_other_pub = self.create_publisher(NavSatFix, '/gnss', 10)
+        self.gnss_best_pub = self.create_publisher(NavSatFix, '/gnss/best', 10)
         self.truth_pub = self.create_publisher(NavSatFix, '/fake/truth', 10)
         self.cloud_pub = self.create_publisher(PointCloud2, '/unilidar/cloud', 5)
         # 可視化用（map 座標）：仮想フィールド全体と、本当に通った道筋
@@ -207,21 +210,28 @@ class FakeSensors(Node):
                 self.outage_start <= self.t < self.outage_start + self.outage_duration
             kind = self.active(self.gnss_events)
             if in_outage or kind == 'outage':
-                self.quality_pub.publish(UInt8(data=0))
+                lost = self.navsat(now, 0.0, 'gnss_link', NavSatStatus.STATUS_NO_FIX)
+                lost.latitude = lost.longitude = lost.altitude = float('nan')
+                lost.position_covariance_type = NavSatFix.COVARIANCE_TYPE_UNKNOWN
+                lost.position_covariance = [0.0] * 9
+                self.gnss_other_pub.publish(lost)          # gnss_fix は未測位も /gnss に出す
             elif kind == 'float':
-                self.gnss_pub.publish(self.navsat(now, 0.30, 'gnss_link', NavSatStatus.STATUS_GBAS_FIX))
-                self.quality_pub.publish(UInt8(data=5))
+                self.publish_gnss(self.navsat(now, 0.30, 'gnss_link', NavSatStatus.STATUS_GBAS_FIX), fixed=False)
             elif kind == 'single':
-                self.gnss_pub.publish(self.navsat(now, 2.5, 'gnss_link', NavSatStatus.STATUS_FIX))
-                self.quality_pub.publish(UInt8(data=1))
+                self.publish_gnss(self.navsat(now, 2.5, 'gnss_link', NavSatStatus.STATUS_FIX), fixed=False)
+            elif kind == 'nocov':
+                # GGA だけのときの gnss_fix：単独測位で、精度が不明（共分散 0・UNKNOWN）
+                msg = self.navsat(now, 2.5, 'gnss_link', NavSatStatus.STATUS_FIX)
+                msg.position_covariance = [0.0] * 9
+                msg.position_covariance_type = NavSatFix.COVARIANCE_TYPE_UNKNOWN
+                self.publish_gnss(msg, fixed=False)
             else:
                 msg = self.navsat(now, self.sigma_gnss, 'gnss_link')
                 if self.gnss_jump and not self.jump_done and self.t >= self.gnss_jump[0]:
                     self.jump_done = True              # RTK Fix・精度 2 cm と言いながら、横に跳んだ位置
                     msg = self.navsat(now, self.sigma_gnss, 'gnss_link', offset=self.gnss_jump[1])
                     self.get_logger().info(f'GNSS を {self.gnss_jump[1]:.1f} m 跳ばしました（RTK Fix のふり）')
-                self.gnss_pub.publish(msg)
-                self.quality_pub.publish(UInt8(data=4))
+                self.publish_gnss(msg, fixed=True)
             self.truth_pub.publish(self.navsat(now, 0.0, 'base_link'))
 
         if self.tick % 25 == 0:                      # 2 Hz：本当の道筋（map 座標）
@@ -237,6 +247,10 @@ class FakeSensors(Node):
                 del self.truth_path.poses[0]
             self.truth_path.header.stamp = now
             self.truth_path_pub.publish(self.truth_path)
+
+    def publish_gnss(self, msg, fixed: bool):
+        (self.gnss_fixed_pub if fixed else self.gnss_other_pub).publish(msg)
+        self.gnss_best_pub.publish(msg)
 
     def active(self, events):
         """いまの時刻に起きているトラブルの種類（なければ None）。"""
@@ -319,7 +333,7 @@ class FakeSensors(Node):
         msg.altitude = 30.0
         var = max(sigma, 0.02) ** 2
         msg.position_covariance = [var, 0.0, 0.0, 0.0, var, 0.0, 0.0, 0.0, 4 * var]
-        msg.position_covariance_type = NavSatFix.COVARIANCE_TYPE_APPROXIMATED
+        msg.position_covariance_type = NavSatFix.COVARIANCE_TYPE_KNOWN
         return msg
 
 
