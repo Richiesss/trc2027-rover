@@ -11,6 +11,7 @@
   /gnss/quality     std_msgs/UInt8         RTK の状態
   /cmd_vel          geometry_msgs/Twist    制御指令
   /control_mode     std_msgs/String        運転の種類（任意）
+  /mission/status   std_msgs/String        ミッションの状態（mission_node が出す。任意）
 出力:
   ~/trc2027/logs/control_history_YYYYmmdd_HHMMSS.csv（1行ごとに書き出すので、電源が落ちても残る）
 """
@@ -26,6 +27,7 @@ from rclpy.executors import ExternalShutdownException
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile
 from sensor_msgs.msg import Imu, NavSatFix
 from std_msgs.msg import String, UInt8
 
@@ -60,6 +62,9 @@ class ControlHistoryNode(Node):
         self.create_subscription(UInt8, '/gnss/quality', self.on_quality, 10)
         self.create_subscription(Twist, cmd_topic, self.on_cmd, 10)
         self.create_subscription(String, '/control_mode', self.on_mode, 10)
+        self.mission = None
+        self.create_subscription(String, '/mission/status', self.on_mission,
+                                 QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
 
         os.makedirs(out_dir, exist_ok=True)
         self.path = os.path.join(out_dir, datetime.now().strftime('control_history_%Y%m%d_%H%M%S.csv'))
@@ -91,6 +96,9 @@ class ControlHistoryNode(Node):
     def on_mode(self, msg):
         self.mode = msg.data
 
+    def on_mission(self, msg):
+        self.mission = msg.data
+
     def write_row(self):
         now = self.get_clock().now()
         cmd_age = None
@@ -114,6 +122,7 @@ class ControlHistoryNode(Node):
             cmd_angular=self.cmd.angular.z if self.cmd else None,
             cmd_age=cmd_age,
             control_mode=self.mode,
+            mission_status=self.mission,
         )
         self.writer.writerow(row)
         self.file.flush()

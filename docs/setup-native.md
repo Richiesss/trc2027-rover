@@ -14,7 +14,7 @@ Ubuntu 24.04 の PC でも同じ手順で使えます。
 | `trc_description` | センサの取付位置（URDF / TF）。**値は仮なので、機体ができたら実測して書き換える** |
 | `trc_logging` | 大会提出用の制御履歴（時刻・位置・方位・制御指令）を CSV に記録する `control_history_node` |
 | `trc_perception` | LiDAR の点群から地面を除いて障害物を検出する `obstacle_detector_node`、前方が塞がったら前進を止める `safety_stop_node` |
-| `trc_navigation` | 障害物をよけて目標へ向かう経路計画 `local_planner_node`（A* + DWA） |
+| `trc_navigation` | 障害物をよけて目標へ向かう経路計画 `local_planner_node`（A* + DWA）、緯度・経度のチェックポイントを回る `mission_node` |
 | `trc_bringup` | 起動用の launch（センサ、位置推定、rosbag の記録） |
 
 ```
@@ -276,6 +276,49 @@ trc-dev での結果（2026/11/26）：4 地点（約 60 m）を約 3 分で回�
 
 > 注意：開発用サンドボックス（2 コア）では KISS-ICP の処理が 1〜2 秒遅れ、その場での回転が多いと `/odometry/global` の向きが大きくずれることがあった（GNSS を外すと起きない）。trc-dev では問題なく走れているが、実機の Jetson でも CPU に余裕があるか確認すること。
 
+### 自律ミッション：緯度・経度のチェックポイントを回る
+
+大会の自律ミッション（競技説明編 1.2）では、チェックポイントは **2 本の ArUco マーカーを結んだ線分**で、**機体全体が線分を跨ぎ切る**と通過になります。
+マーカーの座標は対応表（csv：`id, 緯度, 経度`）で配られます（各チーム 1 組だけ。他は「おおよその領域」）。エントリー部門は、人が座標をもとに通過目標点を設定して回ってよいことになっています。
+
+`mission_node`（trc_navigation）がミッションファイルを読み、次の順に動きます。
+
+1. スタート直後はまっすぐ 4 m 進む（向きの初期化 `heading_init` が RTK で 3 m 走るのを待つ）
+2. 向きが決まったら、navsat_transform の `fromLL` サービスで緯度・経度を map 座標に直す（位置推定と同じ変換）
+3. チェックポイントは、線分の中点を垂直に横切る「手前の点」（線分の 2 m 手前）と「奥の点」（機体の半分 0.6 m + 1.0 m 先）にする
+4. 経路計画に渡し、進み具合を `/mission/status` に出す（制御履歴の `mission_status` 列にも残る）
+
+ミッションファイルの例：`rover/trc_bringup/config/missions/example.yaml`
+
+```yaml
+markers_csv: markers.csv          # 運営の対応表（このファイルからの相対パスでもよい）
+route:
+  - checkpoint: [2, 5]            # 対応表の ID 2 と ID 5 を結ぶ線分
+    name: CP1
+  - checkpoint:                   # 対応表にないマーカーは、推定した座標を書く
+      a: [35.536850, 134.210700]
+      b: [35.536830, 134.210750]
+    name: CP2
+  - latlon: [35.536784, 134.210739]
+    name: 最後の地点
+```
+
+```bash
+# シミュレーター（マーカーの柱を立てた配置 checkpoints）
+python3 scripts/make_sim_mission.py ~/trc2027/missions/sim          # 対応表とミッションファイルを作る
+./scripts/sim_view.sh layout:=checkpoints mission:=$HOME/trc2027/missions/sim/mission.yaml
+
+# 実機（センサ・LiDAR オドメトリ・位置推定を起動したあと）
+ros2 launch trc_bringup navigation.launch.py mission:=$HOME/trc2027/missions/day1.yaml
+```
+
+Foxglove では `/mission/markers`（チェックポイントの線分・マーカー・ウェイポイント）と `/mission/status` を表示すると分かりやすい。
+
+> 注意
+> - 対応表の座標の測地系は資料に書かれていない。GNSS と同じ（WGS84 系）として扱っている。数十 cm 違うと跨ぎ切れないことがあるので、運営に確認すること
+> - マーカーの間が 1.6 m より狭いと警告を出す（ローバーの幅＋余裕が通れない）
+> - ゴール（画像から地点を推定する）は未対応
+
 ### 色々な状況を試す（シナリオ試験）
 
 GNSS の劣化、LiDAR の途切れ、狭いすき間や袋小路などを順に自動で走らせ、結果を表にまとめます。
@@ -302,6 +345,8 @@ GNSS の劣化、LiDAR の途切れ、狭いすき間や袋小路などを順に
 | `dead_end` | まっすぐ行くと袋小路（U 字）→ 回り込む | 到着・接触なし |
 | `clutter` | 岩の間を抜ける | 到着・接触なし |
 | `square` | 4 地点を回る（約 60 m） | 到着 |
+| `checkpoints` | 緯度・経度のチェックポイント 2 つ（真横・斜め）を跨ぎ切って最後の地点へ | 到着・両方を跨ぎ切る |
+| `checkpoints_h200` | 同じコースを、スタートの向き 東から 200° で | 同上 |
 
 結果は `~/trc2027/logs/scenarios_<日時>/results.md`（表）と `results.csv` に、各シナリオのログと一緒に保存されます。
 「接触」は、本当の通り道が障害物にローバーの半径（0.45 m）より近づいたことを表します。

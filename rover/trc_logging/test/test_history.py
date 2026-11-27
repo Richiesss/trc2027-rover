@@ -41,3 +41,13 @@ def test_row_formats_values():
     assert d['gnss_quality'] == '4'
     assert d['cmd_angular'] == '-0.100'
     assert d['control_mode'] == 'auto'
+
+
+def test_mission_status_column():
+    row = history.format_row(
+        time_iso='2027-03-20T10:00:00.000+09:00', ros_time=1.0, latitude=None, longitude=None,
+        map_x=None, map_y=None, yaw_enu=None, speed=None, gnss_quality=None,
+        cmd_linear=None, cmd_angular=None, cmd_age=None, control_mode='auto',
+        mission_status='CP1 の奥（通過） に着きました（2/5）')
+    d = dict(zip(history.COLUMNS, row))
+    assert d['mission_status'] == 'CP1 の奥（通過） に着きました（2/5）'

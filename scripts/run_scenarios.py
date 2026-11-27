@@ -41,6 +41,7 @@ class Scenario:
     timeout: float = 150.0
     max_pos_err: float = 0.5        # これを超えたら不合格 [m]
     expect_reach: bool = True
+    course: bool = False            # True：緯度・経度のチェックポイントを回る（mission_node）
 
 
 SCENARIOS = [
@@ -65,7 +66,12 @@ SCENARIOS = [
              waypoints='14,0', timeout=200.0),
     Scenario('clutter', '岩が 11 個ばらまかれた中を抜けて 14 m 先へ', {'layout': 'clutter'}, waypoints='14,0'),
     Scenario('square', '4 地点を回る（約 60 m）', waypoints='18,-10;18,0;0,-10;0,0', timeout=320.0),
+    Scenario('checkpoints', '緯度・経度のチェックポイント 2 つを跨ぎ切って最後の地点へ', {'layout': 'checkpoints'},
+             course=True, timeout=240.0),
+    Scenario('checkpoints_h200', '同じコースを、スタートの向き 東から 200° で', {'layout': 'checkpoints',
+             'heading_deg': '200.0'}, course=True, timeout=240.0),
 ]
+HALF_LENGTH = 0.6                   # 機体の長さ 1.2 m（規定の上限）の半分
 
 NODE_PATTERN = ('ekf_node|navsat_transform_node|kiss_icp_node|robot_state_publisher|foxglove_bridge|'
                 'trc_(localization|logging|gnss|perception|navigation)/lib|ros2 launch trc_bringup')
@@ -130,6 +136,7 @@ class Monitor:
         self.done_time = None
         self.skipped = 0
         self.stuck = 0
+        self.mission_done = None
         self.subs = [
             node.create_subscription(Float64, '/fake/position_error', lambda m: self.pos_err.append(m.data), 50),
             node.create_subscription(PathMsg, '/fake/truth_path', self.on_truth, 5),
@@ -198,6 +205,8 @@ class Monitor:
         self.safety_on = msg.data
 
     def on_log(self, msg):
+        if msg.name == 'mission' and 'ミッション完了' in msg.msg and self.mission_done is None:
+            self.mission_done = time.monotonic() - self.start
         if msg.name != 'local_planner':
             return
         if 'すべてのウェイポイントに着きました' in msg.msg and self.done_time is None:
@@ -225,13 +234,20 @@ def run_one(node, sc: Scenario, log_dir: Path, timeout_scale: float):
     stop_leftovers()
     args = ['ros2', 'launch', 'trc_bringup', 'sim_test.launch.py', 'foxglove:=false',
             f'waypoints:={sc.waypoints}'] + [f'{k}:={v}' for k, v in sc.args.items()]
+    if sc.course:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from make_sim_mission import write_sim_mission
+        mission = write_sim_mission(str(log_dir / f'mission_{sc.name}'), float(sc.args.get('heading_deg', 90.0)))
+        args.append(f'mission:={mission}')
     log_path = log_dir / f'scenario_{sc.name}.log'
     with open(log_path, 'w') as log:
         proc = subprocess.Popen(args, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         mon = Monitor(node)
         limit = sc.timeout * timeout_scale
         try:
-            while time.monotonic() - mon.start < limit and mon.done_time is None:
+            def finished():
+                return mon.mission_done is not None if sc.course else mon.done_time is not None
+            while time.monotonic() - mon.start < limit and not finished():
                 rclpy.spin_once(node, timeout_sec=0.1)
                 if proc.poll() is not None:
                     break
@@ -250,13 +266,29 @@ def run_one(node, sc: Scenario, log_dir: Path, timeout_scale: float):
                     pass
             mon.destroy()
 
+    with open(log_dir / f'truth_{sc.name}.csv', 'w') as f:          # 本当の通り道（map 座標）
+        f.write('x,y\n' + ''.join(f'{x:.3f},{y:.3f}\n' for x, y in mon.truth))
     clear = mon.clearance()
     pe = np.array(mon.pos_err) if mon.pos_err else np.array([float('nan')])
     ye = max(mon.yaw_err) if mon.yaw_err else float('nan')
-    reached = mon.done_time is not None and mon.skipped == 0
+    done_time = mon.mission_done if sc.course else mon.done_time
+    reached = done_time is not None and mon.skipped == 0
     problems = []
     if sc.expect_reach and not reached:
-        problems.append('着かない' if mon.done_time is None else f'ウェイポイントを {mon.skipped} 個飛ばした')
+        problems.append('着かない' if done_time is None else f'ウェイポイントを {mon.skipped} 個飛ばした')
+    crossed = ''
+    if sc.course:
+        from trc_localization import fake_world as fw
+        from trc_navigation import mission as ms
+        results = []
+        for step in fw.CHECKPOINT_ROUTE:
+            if 'checkpoint' in step:
+                a, b = (fw.CHECKPOINT_MARKERS[i] for i in step['checkpoint'])
+                results.append((step['name'], ms.crossed_fully(mon.truth, a, b, HALF_LENGTH)))
+        crossed = ' '.join(f'{n}{"○" if ok else "×"}' for n, ok in results)
+        missed = [n for n, ok in results if not ok]
+        if missed:
+            problems.append(f'{"・".join(missed)} を跨ぎ切っていない')
     if not math.isnan(clear) and clear < ROBOT_RADIUS:
         problems.append(f'接触（{clear:.2f} m）')
     if np.nanmax(pe) > sc.max_pos_err:
@@ -265,7 +297,8 @@ def run_one(node, sc: Scenario, log_dir: Path, timeout_scale: float):
         'name': sc.name, 'desc': sc.desc,
         'result': '合格' if not problems else '不合格',
         'problems': '・'.join(problems),
-        'time_s': round(mon.done_time, 1) if mon.done_time else '',
+        'time_s': round(done_time, 1) if done_time else '',
+        'checkpoints': crossed,
         'clearance_m': round(clear, 2),
         'pos_err_mean_m': round(float(np.nanmean(pe)), 3),
         'pos_err_max_m': round(float(np.nanmax(pe)), 3),
@@ -313,6 +346,7 @@ def main():
             print(f'    → {r["result"]}  到着 {r["time_s"] or "-"} s  最接近 {r["clearance_m"]} m  '
                   f'位置誤差 平均 {r["pos_err_mean_m"]} / 最大 {r["pos_err_max_m"]} m  '
                   f'向き誤差 最大 {r["yaw_err_max_deg"]}°  安全停止 {r["safety_stops"]} 回'
+                  + (f'  通過 {r["checkpoints"]}' if r['checkpoints'] else '')
                   + (f'  （{r["problems"]}）' if r['problems'] else ''), flush=True)
     except KeyboardInterrupt:
         print('中断しました', file=sys.stderr)
@@ -328,12 +362,12 @@ def main():
         w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
         w.writeheader()
         w.writerows(rows)
-    md = ['| シナリオ | 内容 | 結果 | 到着 [s] | 最接近 [m] | 位置誤差 平均/最大 [m] | 向き誤差 最大 [°] | 安全停止 | 問題 |',
-          '| --- | --- | --- | --- | --- | --- | --- | --- | --- |']
+    md = ['| シナリオ | 内容 | 結果 | 到着 [s] | 最接近 [m] | 位置誤差 平均/最大 [m] | 向き誤差 最大 [°] | 安全停止 | 通過 | 問題 |',
+          '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |']
     for r in rows:
         md.append(f'| {r["name"]} | {r["desc"]} | {r["result"]} | {r["time_s"] or "-"} | {r["clearance_m"]} | '
                   f'{r["pos_err_mean_m"]} / {r["pos_err_max_m"]} | {r["yaw_err_max_deg"]} | {r["safety_stops"]} | '
-                  f'{r["problems"]} |')
+                  f'{r["checkpoints"] or "-"} | {r["problems"]} |')
     md_path = log_dir / 'results.md'
     md_path.write_text('\n'.join(md) + '\n')
     passed = sum(r['result'] == '合格' for r in rows)

@@ -20,6 +20,7 @@ COLUMNS = [
     'cmd_angular',     # 制御指令：旋回の速さ [rad/s]
     'cmd_age_sec',     # 最後に制御指令を受け取ってからの時間 [s]
     'control_mode',    # 運転の種類（auto / command / remote など。送られていなければ空欄）
+    'mission_status',  # ミッションの状態（/mission/status。例「CP1 の奥（通過） に着きました（2/5）」）
 ]
 
 
@@ -44,7 +45,8 @@ def format_row(time_iso: str, ros_time: float,
                yaw_enu: Optional[float], speed: Optional[float],
                gnss_quality: Optional[int],
                cmd_linear: Optional[float], cmd_angular: Optional[float],
-               cmd_age: Optional[float], control_mode: Optional[str]) -> list:
+               cmd_age: Optional[float], control_mode: Optional[str],
+               mission_status: Optional[str] = None) -> list:
     heading = None if yaw_enu is None else enu_yaw_to_compass_deg(yaw_enu)
     return [
         time_iso,
@@ -60,4 +62,5 @@ def format_row(time_iso: str, ros_time: float,
         _fmt(cmd_angular, 3),
         _fmt(cmd_age, 2),
         control_mode or '',
+        mission_status or '',
     ]
