@@ -2,6 +2,7 @@
 
 入力（引数で差し替え可）:
   lidar_odom_topic  LiDARオドメトリ（nav_msgs/Odometry）。既定 /lidar/odom
+                    odom_to_twist_node で速度（/lidar/twist）にしてから EKF に入れる
   imu_topic         L2 内蔵 IMU（sensor_msgs/Imu）。既定 /unilidar/imu
   gnss_topic        trc_gnss の出力（sensor_msgs/NavSatFix）。既定 /gnss/fix
 出力:
@@ -26,7 +27,7 @@ def generate_launch_description():
     gnss = LaunchConfiguration('gnss_topic')
 
     common = {'use_sim_time': use_sim_time}
-    topics = {'odom0': lidar_odom, 'imu0': imu}
+    topics = {'odom0': '/lidar/twist', 'imu0': imu}
 
     return LaunchDescription([
         DeclareLaunchArgument('use_sim_time', default_value='false',
@@ -35,6 +36,12 @@ def generate_launch_description():
         DeclareLaunchArgument('imu_topic', default_value='/unilidar/imu'),
         DeclareLaunchArgument('gnss_topic', default_value='/gnss/fix'),
 
+        # LiDAR オドメトリ（位置）→ ローバー基準の速度。EKF には速度として入れる
+        Node(
+            package='trc_localization', executable='odom_to_twist_node', name='lidar_twist',
+            parameters=[common],
+            remappings=[('odometry', lidar_odom), ('twist', '/lidar/twist')],
+        ),
         Node(
             package='robot_localization', executable='ekf_node', name='ekf_odom',
             parameters=[config, common, topics],

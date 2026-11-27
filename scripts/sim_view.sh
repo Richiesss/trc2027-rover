@@ -18,7 +18,7 @@ ROS_SETUP="${ROS_SETUP:-/opt/ros/jazzy/setup.bash}"
 PORT=8765
 
 # このリポジトリで起動するノード（前回の残りを探すのに使う）
-NODE_PATTERN='ekf_node|navsat_transform_node|kiss_icp_node|robot_state_publisher|foxglove_bridge|trc_(localization|logging|gnss)/lib|ros2 launch trc_bringup'
+NODE_PATTERN='ekf_node|navsat_transform_node|kiss_icp_node|robot_state_publisher|foxglove_bridge|trc_(localization|logging|gnss|perception|navigation)/lib|ros2 launch trc_bringup'
 
 YES=0
 STOP_ONLY=0

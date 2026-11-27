@@ -13,6 +13,8 @@ Ubuntu 24.04 の PC でも同じ手順で使えます。
 | `trc_localization` | robot_localization（2段の EKF + navsat_transform）の設定と、向きの初期化ノード `heading_init`、実機なしで試すための `fake_sensors_node` |
 | `trc_description` | センサの取付位置（URDF / TF）。**値は仮なので、機体ができたら実測して書き換える** |
 | `trc_logging` | 大会提出用の制御履歴（時刻・位置・方位・制御指令）を CSV に記録する `control_history_node` |
+| `trc_perception` | LiDAR の点群から地面を除いて障害物を検出する `obstacle_detector_node`、前方が塞がったら前進を止める `safety_stop_node` |
+| `trc_navigation` | 障害物をよけて目標へ向かう経路計画 `local_planner_node`（A* + DWA） |
 | `trc_bringup` | 起動用の launch（センサ、位置推定、rosbag の記録） |
 
 ```
@@ -197,6 +199,82 @@ Mac のブラウザで [Foxglove](https://app.foxglove.dev)（無料アカウン
 - `gnss_outage_start:=25.0` で起動すると、`/gnss/path` が途切れても `/localization/path` が本当の軌跡に沿って伸び続ける
 
 画面が不要なときは `foxglove:=false` で bridge を起動しません。
+
+### 障害物を見つけて止まる
+
+`sim_test` は障害物検出（`obstacle_detector_node`）と安全停止（`safety_stop_node`）も起動します。
+にせのローバーは速度指令（`/cmd_vel`）で動き、指令は次の順に流れます。
+
+```
+scripted_driver（決まった道筋：直進 12 秒 → 左に曲がり続ける）
+   │ /cmd_vel_nav
+   ▼
+safety_stop ◀── /obstacles/stop ── obstacle_detector ◀── /unilidar/cloud
+   │ /cmd_vel（前方に障害物があれば前進を 0 に。回転・後退は通す）
+   ▼
+fake_sensors（にせのローバー）
+```
+
+```bash
+./scripts/sim_view.sh obstacle_ahead:=6.0                 # 6 m 先に岩。手前で止まり、曲がる指令が来たら向きを変えて避ける
+./scripts/sim_view.sh obstacle_ahead:=6.0 safety:=false   # 止めずに通り抜ける（比べる用）
+```
+
+6 m 先に岩を置いたときの動き（2026/11/26、開発環境）：
+
+| 時刻 | 動き |
+| --- | --- |
+| 0〜9 秒 | 直進。前方の距離が 0.5 m/s で縮む |
+| 約 9 秒 | 岩の 1.5 m 手前（ローバーは 3.7 m 進んだ所）で停止 |
+| 12 秒 | 運転手が「曲がれ」を出す → 前進は止めたまま、その場で向きを変える |
+| 約 15 秒 | 前方が 1.8 m 以上空いたので前進を再開。岩をよけて走り続ける |
+
+| トピック | 中身 |
+| --- | --- |
+| `/obstacles/points` | 障害物とみなした点（Foxglove では赤など目立つ色に） |
+| `/obstacles/ground` | 地面とみなした点 |
+| `/obstacles/corridor` | 前方の帯（幅 1 m・長さ 5 m）。緑：空いている／赤：止まるべき |
+| `/obstacles/front_distance` | 帯に入った障害物までの距離 [m]（何もなければ 5.0） |
+| `/obstacles/stop` | 1.5 m より近いと true。一度止まったら 1.8 m より空くまで true（ばたつき防止） |
+| `/safety/active` | 安全停止が前進を止めているとき true |
+
+地面の見分け方：水平面を 40 cm 四方のマスに分け、周りのマスの一番低い点から地面の高さを求めます（勾配 30 % までは坂として許す）。そこから 15 cm 以上高い点が障害物です。
+仮想フィールドでの結果：20 m 以内の障害物の点を 96 % 以上検出、地面を障害物と間違えたのは 0 %。処理は 1 回 数 ms。
+
+安全停止は、障害物の情報が 0.5 秒以上来ないときも前進を止めます（障害物検出が落ちたときに走り続けないように）。
+
+> 実機では、走行制御が `/cmd_vel_nav` に指令を出し、`perception.launch.py safety:=true` で `/cmd_vel`（モータ）へ渡す構成を想定しています。モータ側の担当と、トピック名を合わせること。
+> 取付位置（URDF）が合っていないと地面が傾いて見えて誤検出が増えます。本番の砂山や段差でしきい値（`height_threshold`、`max_slope`）の調整も必要です。
+
+### 障害物をよけて目標へ向かう
+
+`sim_test` の運転手は、既定で経路計画（`trc_navigation/local_planner_node`）です。目標（ウェイポイント）へ向かって、障害物をよけながら進みます。
+
+```bash
+./scripts/sim_view.sh                                         # 18 m 先（途中に長い壁）へ
+./scripts/sim_view.sh 'waypoints:=18,-10;18,0;0,-10;0,0'      # 4 地点を回る
+./scripts/sim_view.sh driver:=script obstacle_ahead:=6.0      # これまでの決まった道筋（止まるだけ）
+```
+
+ウェイポイントは map 座標です（原点はスタート地点、x はスタート時の前方、y は左）。Foxglove の 3D パネルの「Publish pose」で `/goal_pose` に送ると、その場で目標を変えられます。
+
+2 段構えで動きます。
+
+1. **地図の上で道筋を探す（1 秒ごと）**：見つけた障害物を map 座標の格子地図（25 cm 四方）に書きため、A* で目標までの道筋を探す。障害物はローバーの半径＋余裕（0.7 m）だけ太らせ、近くは通りにくくして真ん中を通る。地面が見えたマスは記録を減らすので、位置のずれで間違って書いた障害物は消えていく
+2. **目の前をよけて進む（10 Hz）**：道筋の 2 m 先を目指して、DWA で「速さ × 曲がり方」の候補を 4 秒先まで予測し、障害物に近づく・安全停止に引っかかるものを捨てて、進み具合・向き・余裕・速さの点数で選ぶ
+
+前が塞がっているとき（安全停止がかかったときを含む）は、その場で同じ向きに回り、前が 1.8 m 以上空いた状態が続いてから進み始めます。
+
+| トピック | 中身 |
+| --- | --- |
+| `/planner/global_path` | 地図の上で探した道筋（map） |
+| `/planner/map` | 障害物の地図（OccupancyGrid、map） |
+| `/planner/trajectory` | DWA が選んだ動きの予測（base_link） |
+| `/planner/waypoints` | 残りのウェイポイント |
+
+trc-dev での結果（2026/11/26）：4 地点（約 60 m）を約 3 分で回り切り、安全停止は 1 回。
+
+> 注意：開発用サンドボックス（2 コア）では KISS-ICP の処理が 1〜2 秒遅れ、その場での回転が多いと `/odometry/global` の向きが大きくずれることがあった（GNSS を外すと起きない）。trc-dev では問題なく走れているが、実機の Jetson でも CPU に余裕があるか確認すること。
 
 ## 4. 実機のセンサを動かす
 

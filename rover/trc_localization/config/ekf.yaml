@@ -4,6 +4,7 @@
 #   ekf_map  : 上に GNSS を加える          → map→odom（GNSS でずれを直す）
 #   navsat_transform : GNSS の緯度経度を map 座標に変換（/odometry/gps）
 #
+# LiDAR オドメトリ（位置）は odom_to_twist_node で速度（/lidar/twist）にしてから両方の EKF に入れる。
 # トピック名は launch/localization.launch.py の引数で差し替えられる。
 # 配列の順番: [x, y, z, roll, pitch, yaw, vx, vy, vz, vroll, vpitch, vyaw, ax, ay, az]
 
@@ -11,6 +12,11 @@ ekf_odom:
   ros__parameters:
     frequency: 30.0
     sensor_timeout: 0.2
+    # LiDAR オドメトリの速度は処理の分だけ遅れて届く（重いときは 1 秒以上）。
+    # 遅れて届いた計測を、測った時刻に入れ直して計算し直す（入れないと、GNSS との食い違いを
+    # 向きのずれで埋めようとして、ekf_map の向きが大きくずれた）
+    smooth_lagged_data: true
+    history_length: 3.0
     two_d_mode: true            # まずは平面で考える（坂の登り下りは後で検討）
     publish_tf: true
     map_frame: map
@@ -18,14 +24,17 @@ ekf_odom:
     base_link_frame: base_link
     world_frame: odom
 
-    # LiDARオドメトリ（KISS-ICP / Point-LIO など）。位置の「差分」を速度として使う
-    odom0: /lidar/odom
-    odom0_config: [true,  true,  false,
-                   false, false, true,
+    # LiDARオドメトリ（KISS-ICP / Point-LIO など）を odom_to_twist_node で速度にしたもの。
+    # ローバー基準の前後・左右の速さを使う。回転の速さは IMU の方が正確なので IMU だけから取る。
+    # （位置の差分 differential は使わない：
+    # ekf_map では差分を自分の map→odom で回してから使うため、向きのずれが自己増幅した）
+    odom0: /lidar/twist
+    odom0_config: [false, false, false,
                    false, false, false,
+                   true,  true,  false,
                    false, false, false,
                    false, false, false]
-    odom0_differential: true
+    odom0_differential: false
     odom0_queue_size: 10
 
     # L2 内蔵 IMU。北の基準がないので、回転の速さ（vyaw）だけ使う
@@ -43,6 +52,11 @@ ekf_map:
   ros__parameters:
     frequency: 30.0
     sensor_timeout: 0.2
+    # LiDAR オドメトリの速度は処理の分だけ遅れて届く（重いときは 1 秒以上）。
+    # 遅れて届いた計測を、測った時刻に入れ直して計算し直す（入れないと、GNSS との食い違いを
+    # 向きのずれで埋めようとして、ekf_map の向きが大きくずれた）
+    smooth_lagged_data: true
+    history_length: 3.0
     two_d_mode: true
     publish_tf: true
     map_frame: map
@@ -50,13 +64,13 @@ ekf_map:
     base_link_frame: base_link
     world_frame: map
 
-    odom0: /lidar/odom
-    odom0_config: [true,  true,  false,
-                   false, false, true,
+    odom0: /lidar/twist
+    odom0_config: [false, false, false,
                    false, false, false,
+                   true,  true,  false,
                    false, false, false,
                    false, false, false]
-    odom0_differential: true
+    odom0_differential: false
     odom0_queue_size: 10
 
     imu0: /unilidar/imu

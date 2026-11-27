@@ -68,6 +68,12 @@ def make_world(seed: int = 0, size: float = 60.0, keep_clear=((-7.5, 1.5), (-1.5
     return np.vstack(parts).astype(np.float64)
 
 
+def make_rock(x: float, y: float, size: float = 0.8, height: float = 0.5, seed: int = 0) -> np.ndarray:
+    """(x, y) に岩（箱）を 1 つ置く（障害物検出の試験用）。"""
+    rng = np.random.default_rng(seed + 2000)
+    return _box(rng, x, y, size, size, height, 0.0, 600)
+
+
 def make_ground(seed: int = 0, size: float = 60.0, n: int = 150000,
                 amplitude: float = 0.08, wavelength: float = 4.0) -> np.ndarray:
     """地面の点（world 座標）。砂地を想定して、ゆるい起伏（振幅 amplitude）を付ける。
