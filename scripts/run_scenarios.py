@@ -70,10 +70,32 @@ NODE_PATTERN = ('ekf_node|navsat_transform_node|kiss_icp_node|robot_state_publis
 
 
 def stop_leftovers():
-    subprocess.run(['pkill', '-INT', '-f', NODE_PATTERN], check=False)
+    """自分のユーザーで動いている前回のノードだけを止める（他の人が同じ機体で動かしているものは触らない）。"""
+    me = str(os.getuid())
+    subprocess.run(['pkill', '-u', me, '-INT', '-f', NODE_PATTERN], check=False)
     time.sleep(2.0)
-    subprocess.run(['pkill', '-KILL', '-f', NODE_PATTERN], check=False)
+    subprocess.run(['pkill', '-u', me, '-KILL', '-f', NODE_PATTERN], check=False)
     time.sleep(0.5)
+
+
+def warn_other_users():
+    """他のユーザーが同じ機体で ROS のノードを動かしていれば知らせる（ROS_DOMAIN_ID が同じだと混ざる）。"""
+    out = subprocess.run(['pgrep', '-a', '-f', NODE_PATTERN], capture_output=True, text=True).stdout
+    me = os.getuid()
+    others = []
+    for line in out.splitlines():
+        pid = int(line.split()[0])
+        try:
+            if os.stat(f'/proc/{pid}').st_uid != me:
+                others.append(line[:120])
+        except FileNotFoundError:
+            pass
+    if others:
+        print(f'[注意] 他のユーザーが ROS のノードを動かしています（{len(others)} 個）。'
+              f'ROS_DOMAIN_ID={os.environ.get("ROS_DOMAIN_ID", "0")} が同じだとトピックが混ざります:',
+              file=sys.stderr)
+        for o in others[:5]:
+            print(f'    {o}', file=sys.stderr)
 
 
 def yaw_of(q):
@@ -273,6 +295,7 @@ def main():
             return 2
         chosen = [s for s in SCENARIOS if s.name in names]
 
+    warn_other_users()
     import rclpy
     stamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
     log_dir = Path(a.log_dir) / f'scenarios_{stamp}'
