@@ -39,7 +39,7 @@ die()  { printf '\033[1;31m[エラー]\033[0m %s\n' "$*" >&2; exit 1; }
 # 該当するプロセスの PID（シェルや tee など、コマンド行に文字列を含むだけのものは除く）
 find_leftovers() {
   local pid comm
-  for pid in $(pgrep -f -- "$NODE_PATTERN"); do
+  for pid in $(pgrep -u "$(id -u)" -f -- "$NODE_PATTERN"); do   # 自分のプロセスだけ
     [ "$pid" = "$$" ] && continue
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || continue
     case "$(ps -o stat= -p "$pid" 2>/dev/null)" in Z*) continue ;; esac   # 終了済み（ゾンビ）

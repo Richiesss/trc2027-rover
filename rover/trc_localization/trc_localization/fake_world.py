@@ -74,6 +74,50 @@ def make_rock(x: float, y: float, size: float = 0.8, height: float = 0.5, seed: 
     return _box(rng, x, y, size, size, height, 0.0, 600)
 
 
+# 試験用の配置。座標はスタート地点が原点、x がスタート時の前方、y が左（map 座標と同じ）。
+# 置く前に、この範囲にある元の仮想フィールドの物体は取り除く（配置どうしが混ざらないように）。
+LAYOUT_ZONE = ((1.0, 17.0), (-8.0, 8.0))
+LAYOUTS = ('default', 'gap', 'narrow', 'dead_end', 'clutter')
+
+
+def _wall(rng, x0, y0, x1, y1, height=0.6, thickness=0.3, density=300):
+    """(x0, y0) から (x1, y1) までの壁。"""
+    length = math.hypot(x1 - x0, y1 - y0)
+    return _box(rng, (x0 + x1) / 2, (y0 + y1) / 2, length, thickness, height,
+                math.atan2(y1 - y0, x1 - x0), max(50, int(density * length)))
+
+
+def make_layout(name: str, seed: int = 0) -> np.ndarray:
+    """試験用の障害物の配置（map 座標）。目標は (14, 0) を想定。
+
+    gap      : x = 7 に横長の壁。真ん中に幅 2.0 m のすき間（通れる）
+    narrow   : 同じ壁で、すき間は幅 1.0 m（ローバーには狭すぎる。壁の端を回る必要がある）
+    dead_end : スタート側に口を開けた U 字（奥行き 5 m・幅 4 m）。まっすぐ行くと袋小路
+    clutter  : x = 4〜9.6 に、千鳥の格子に沿って岩を 11 個ばらまく（岩どうしの間は 1.4 m 以上）
+    """
+    rng = np.random.default_rng(seed + 3000)
+    if name == 'default':
+        return np.empty((0, 3))
+    if name in ('gap', 'narrow'):
+        half = 1.0 if name == 'gap' else 0.5
+        return np.vstack([_wall(rng, 7.0, -6.0, 7.0, -half), _wall(rng, 7.0, half, 7.0, 6.0)])
+    if name == 'dead_end':
+        return np.vstack([_wall(rng, 4.0, 2.0, 9.0, 2.0), _wall(rng, 4.0, -2.0, 9.0, -2.0),
+                          _wall(rng, 9.0, -2.0, 9.0, 2.0)])
+    if name == 'clutter':
+        # 千鳥に並べた格子（間隔 2.8 m）に少しずらして岩を置く。岩どうしの間は 1.4 m 以上空く
+        rocks = []
+        for i, x in enumerate((4.0, 6.8, 9.6)):
+            for y in (-4.2, -1.4, 1.4, 4.2):
+                yy = y + (1.4 if i % 2 else 0.0)
+                if abs(yy) > 5.0:
+                    continue
+                rocks.append((x + rng.uniform(-0.25, 0.25), yy + rng.uniform(-0.25, 0.25)))
+        return np.vstack([_box(rng, x, y, rng.uniform(0.4, 0.8), rng.uniform(0.4, 0.8),
+                               rng.uniform(0.3, 0.7), rng.uniform(0, math.pi), 250) for x, y in rocks])
+    raise ValueError(f'layout は {LAYOUTS} のどれか: {name}')
+
+
 def make_ground(seed: int = 0, size: float = 60.0, n: int = 150000,
                 amplitude: float = 0.08, wavelength: float = 4.0) -> np.ndarray:
     """地面の点（world 座標）。砂地を想定して、ゆるい起伏（振幅 amplitude）を付ける。

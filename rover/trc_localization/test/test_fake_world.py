@@ -49,3 +49,36 @@ def test_ground_is_fixed_in_world_not_to_sensor():
     b = fw.world_to_sensor(ground, 1.0, 0.0, 0.0, 0.2, 0.4)
     assert np.allclose(b[:, 0], a[:, 0] - 1.0)
     assert abs(ground[:, 2]).max() <= 0.08 * 1.5 + 1e-9
+
+
+def test_parse_events_and_jump():
+    from trc_localization.fake_sensors_node import parse_events, parse_jump
+    assert parse_events('10:30:float; 50:5:outage') == [(10.0, 30.0, 'float'), (50.0, 5.0, 'outage')]
+    assert parse_events('20:3', default_kind='drop') == [(20.0, 3.0, 'drop')]
+    assert parse_events('') == []
+    assert parse_jump('25:5') == (25.0, 5.0) and parse_jump('') is None
+    import pytest
+    with pytest.raises(ValueError):
+        parse_events('10:5:unknown')
+
+
+def test_layouts():
+    import numpy as np
+    from trc_localization import fake_world
+    for name in fake_world.LAYOUTS:
+        pts = fake_world.make_layout(name)
+        assert pts.shape[1] == 3
+    # すき間の幅：x = 7 付近で、y = 0 に一番近い壁の点まで
+    for name, half in (('gap', 1.0), ('narrow', 0.5)):
+        p = fake_world.make_layout(name)
+        near = p[np.abs(p[:, 0] - 7.0) < 0.3]
+        assert abs(np.abs(near[:, 1]).min() - half) < 0.05
+    # 岩だらけ：岩どうしのすき間はローバーが通れる幅（1.4 m）以上
+    from trc_localization import fake_world as fw
+    rng = np.random.default_rng(0)
+    p = fw.make_layout('clutter')
+    assert len(p) > 1000
+    # 目標 (14, 0) のまわりは空いている
+    for name in ('gap', 'narrow', 'dead_end', 'clutter'):
+        p = fake_world.make_layout(name)
+        assert np.hypot(p[:, 0] - 14.0, p[:, 1]).min() > 1.5
