@@ -37,6 +37,29 @@ from trc_localization import fake_world
 from trc_localization import heading_math as hm
 
 
+def parse_events(text: str, default_kind: str = None):
+    """'10:30:float; 50:5:outage' → [(10.0, 30.0, 'float'), (50.0, 5.0, 'outage')]"""
+    out = []
+    for part in (text or '').split(';'):
+        part = part.strip()
+        if not part:
+            continue
+        f = [v.strip() for v in part.split(':')]
+        kind = f[2] if len(f) > 2 else default_kind
+        if kind not in ('outage', 'float', 'single', 'drop'):
+            raise ValueError(f'トラブルの種類が分かりません: {part}')
+        out.append((float(f[0]), float(f[1]), kind))
+    return out
+
+
+def parse_jump(text: str):
+    """'20:5' → (20.0, 5.0)（20 秒後に 5 m 跳ぶ）。空なら None。"""
+    if not (text or '').strip():
+        return None
+    t, d = (float(v) for v in text.split(':'))
+    return t, d
+
+
 class FakeSensors(Node):
 
     def __init__(self):
@@ -69,6 +92,18 @@ class FakeSensors(Node):
         # 障害物検出の試験用：スタートの向きにこの距離 [m] 進んだ所に岩を置く（負なら置かない）
         self.obstacle_ahead = float(self.declare_parameter('obstacle_ahead', -1.0, any_number).value)
 
+        # --- 試験用のトラブル（シナリオ試験で使う。すべて既定では起きない）---
+        # 障害物の配置：default / gap / narrow / dead_end / clutter（fake_world.make_layout）
+        self.layout = self.declare_parameter('layout', 'default').value
+        # GNSS の劣化 "開始秒:続く秒:種類; ..."。種類は outage（途切れ）/ float（RTK Float）/ single（単独測位）
+        self.gnss_events = parse_events(self.declare_parameter('gnss_events', '').value)
+        # GNSS が RTK Fix のふりをして 1 回だけ跳ぶ（マルチパス）。"秒:距離[m]"
+        self.gnss_jump = parse_jump(self.declare_parameter('gnss_jump', '').value)
+        # LiDAR の点群が止まる "開始秒:続く秒; ..."
+        self.lidar_drops = parse_events(self.declare_parameter('lidar_drop', '').value, default_kind='drop')
+        # IMU の回転の速さのずれ [rad/s]（0.01 で 1 分に 34°）
+        self.imu_bias = float(self.declare_parameter('imu_bias', 0.0, any_number).value)
+
         self.odom_pub = self.create_publisher(Odometry, '/lidar/odom', 10)
         self.imu_pub = self.create_publisher(Imu, '/unilidar/imu', 10)
         self.gnss_pub = self.create_publisher(NavSatFix, '/gnss/fix', 10)
@@ -85,6 +120,8 @@ class FakeSensors(Node):
         if self.publish_cloud:
             self.rng = np.random.default_rng(0)
             self.world = fake_world.make_world(seed=0)
+            if self.layout != 'default':
+                self.world = self.apply_layout(self.world, self.layout)
             if self.obstacle_ahead > 0.0:
                 d = self.obstacle_ahead
                 rock = fake_world.make_rock(d * math.cos(self.heading0), d * math.sin(self.heading0))
@@ -103,6 +140,7 @@ class FakeSensors(Node):
         self.last_time = None
         self.cmd = (0.0, 0.0)
         self.cmd_time = None
+        self.jump_done = False
         if self.drive_mode == 'cmd_vel':
             self.create_subscription(Twist, '/cmd_vel', self.on_cmd, 10)
             self.get_logger().info('/cmd_vel の速度指令で動きます')
@@ -139,12 +177,12 @@ class FakeSensors(Node):
         imu = Imu()                                 # 50 Hz
         imu.header.stamp = now
         imu.header.frame_id = 'unilidar_imu'
-        imu.angular_velocity.z = w
+        imu.angular_velocity.z = w + self.imu_bias
         imu.angular_velocity_covariance = [1e-4, 0.0, 0.0, 0.0, 1e-4, 0.0, 0.0, 0.0, 1e-4]
         imu.orientation_covariance[0] = -1.0         # 向きは出さない（北の基準がない）
         self.imu_pub.publish(imu)
 
-        if self.tick % 5 == 0 and self.publish_cloud:   # 10 Hz
+        if self.tick % 5 == 0 and self.publish_cloud and not self.active(self.lidar_drops):   # 10 Hz
             self.cloud_pub.publish(self.make_cloud(now))
 
         if self.tick % 5 == 0 and self.publish_odom:    # 10 Hz
@@ -167,11 +205,23 @@ class FakeSensors(Node):
         if self.tick % 10 == 0:                      # 5 Hz
             in_outage = self.outage_start >= 0.0 and \
                 self.outage_start <= self.t < self.outage_start + self.outage_duration
-            if not in_outage:
-                self.gnss_pub.publish(self.navsat(now, self.sigma_gnss, 'gnss_link'))
-                self.quality_pub.publish(UInt8(data=4))
-            else:
+            kind = self.active(self.gnss_events)
+            if in_outage or kind == 'outage':
                 self.quality_pub.publish(UInt8(data=0))
+            elif kind == 'float':
+                self.gnss_pub.publish(self.navsat(now, 0.30, 'gnss_link', NavSatStatus.STATUS_GBAS_FIX))
+                self.quality_pub.publish(UInt8(data=5))
+            elif kind == 'single':
+                self.gnss_pub.publish(self.navsat(now, 2.5, 'gnss_link', NavSatStatus.STATUS_FIX))
+                self.quality_pub.publish(UInt8(data=1))
+            else:
+                msg = self.navsat(now, self.sigma_gnss, 'gnss_link')
+                if self.gnss_jump and not self.jump_done and self.t >= self.gnss_jump[0]:
+                    self.jump_done = True              # RTK Fix・精度 2 cm と言いながら、横に跳んだ位置
+                    msg = self.navsat(now, self.sigma_gnss, 'gnss_link', offset=self.gnss_jump[1])
+                    self.get_logger().info(f'GNSS を {self.gnss_jump[1]:.1f} m 跳ばしました（RTK Fix のふり）')
+                self.gnss_pub.publish(msg)
+                self.quality_pub.publish(UInt8(data=4))
             self.truth_pub.publish(self.navsat(now, 0.0, 'base_link'))
 
         if self.tick % 25 == 0:                      # 2 Hz：本当の道筋（map 座標）
@@ -187,6 +237,26 @@ class FakeSensors(Node):
                 del self.truth_path.poses[0]
             self.truth_path.header.stamp = now
             self.truth_path_pub.publish(self.truth_path)
+
+    def active(self, events):
+        """いまの時刻に起きているトラブルの種類（なければ None）。"""
+        for start, duration, kind in events:
+            if start <= self.t < start + duration:
+                return kind
+        return None
+
+    def apply_layout(self, world, name):
+        """試験用の配置に入れ替える（その範囲にあった元の物体は取り除く）。"""
+        (x0, x1), (y0, y1) = fake_world.LAYOUT_ZONE
+        c, s = math.cos(-self.heading0), math.sin(-self.heading0)
+        mx = c * world[:, 0] - s * world[:, 1]
+        my = s * world[:, 0] + c * world[:, 1]
+        keep = ~((mx >= x0) & (mx <= x1) & (my >= y0) & (my <= y1))
+        lay = fake_world.make_layout(name)
+        c, s = math.cos(self.heading0), math.sin(self.heading0)   # map → ENU
+        lay_enu = np.c_[c * lay[:, 0] - s * lay[:, 1], s * lay[:, 0] + c * lay[:, 1], lay[:, 2]]
+        self.get_logger().info(f'障害物の配置: {name}')
+        return np.vstack([world[keep], lay_enu])
 
     def enu_to_map(self, e, n):
         """ENU（東・北）を map 座標に直す。
@@ -232,13 +302,16 @@ class FakeSensors(Node):
         msg.data = pts.tobytes()
         return msg
 
-    def navsat(self, stamp, sigma, frame):
+    def navsat(self, stamp, sigma, frame, status=NavSatStatus.STATUS_GBAS_FIX, offset=0.0):
         e = self.e + random.gauss(0.0, sigma) if sigma > 0 else self.e
         n = self.n + random.gauss(0.0, sigma) if sigma > 0 else self.n
+        if offset:                                    # 進行方向の左へずらす
+            e -= offset * math.sin(self.yaw)
+            n += offset * math.cos(self.yaw)
         msg = NavSatFix()
         msg.header.stamp = stamp
         msg.header.frame_id = frame
-        msg.status.status = NavSatStatus.STATUS_GBAS_FIX
+        msg.status.status = status
         msg.status.service = NavSatStatus.SERVICE_GPS
         msg.latitude = self.lat0 + math.degrees(n / hm.EARTH_RADIUS)
         msg.longitude = self.lon0 + math.degrees(

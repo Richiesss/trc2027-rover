@@ -276,6 +276,44 @@ trc-dev での結果（2026/11/26）：4 地点（約 60 m）を約 3 分で回�
 
 > 注意：開発用サンドボックス（2 コア）では KISS-ICP の処理が 1〜2 秒遅れ、その場での回転が多いと `/odometry/global` の向きが大きくずれることがあった（GNSS を外すと起きない）。trc-dev では問題なく走れているが、実機の Jetson でも CPU に余裕があるか確認すること。
 
+### 色々な状況を試す（シナリオ試験）
+
+GNSS の劣化、LiDAR の途切れ、狭いすき間や袋小路などを順に自動で走らせ、結果を表にまとめます。
+1 つ 1〜5 分、全部で 20〜30 分かかります（画面は出さない）。
+
+```bash
+./scripts/run_scenarios.sh                     # 全部
+./scripts/run_scenarios.sh --only gap,narrow   # 一部だけ
+./scripts/run_scenarios.sh --list              # 一覧
+```
+
+| シナリオ | 内容 | 合格の目安 |
+| --- | --- | --- |
+| `baseline` | RTK Fix のまま 18 m 先へ（途中に長い壁） | 到着・接触なし・位置誤差 0.5 m 以下 |
+| `heading_200` | スタートの向きが南西 | 同上 |
+| `gnss_outage_30` | GNSS が 15 秒後から 30 秒途切れる | 位置誤差 1.0 m 以下 |
+| `gnss_float` | 10 秒後から 40 秒 RTK Float（誤差 30 cm） | 位置誤差 1.0 m 以下 |
+| `gnss_single` | 10 秒後から 30 秒 単独測位（誤差 2.5 m） | 位置誤差 3.0 m 以下 |
+| `gnss_jump` | 25 秒後に 1 回だけ 5 m 跳ぶ（RTK Fix のふり＝マルチパス） | 位置誤差 1.0 m 以下 |
+| `lidar_drop` | LiDAR が 20 秒後から 3 秒止まる | 到着 |
+| `imu_bias` | IMU の回転の速さが 0.01 rad/s ずれている | 到着 |
+| `gap` | 幅 2.0 m のすき間を抜ける | 到着・接触なし |
+| `narrow` | すき間 1.0 m（通れない）→ 壁の端を回る | 到着・接触なし |
+| `dead_end` | まっすぐ行くと袋小路（U 字）→ 回り込む | 到着・接触なし |
+| `clutter` | 岩の間を抜ける | 到着・接触なし |
+| `square` | 4 地点を回る（約 60 m） | 到着 |
+
+結果は `~/trc2027/logs/scenarios_<日時>/results.md`（表）と `results.csv` に、各シナリオのログと一緒に保存されます。
+「接触」は、本当の通り道が障害物にローバーの半径（0.45 m）より近づいたことを表します。
+
+個別のトラブルは `sim_test.launch.py` / `sim_view.sh` の引数でも起こせます（画面で見ながら確かめるとき）。
+
+```bash
+./scripts/sim_view.sh layout:=dead_end waypoints:=14,0
+./scripts/sim_view.sh gnss_events:="10:40:float; 60:10:outage" gnss_jump:=25:5
+./scripts/sim_view.sh lidar_drop:=20:3 imu_bias:=0.01
+```
+
 ## 4. 実機のセンサを動かす
 
 ### GNSS

@@ -39,6 +39,7 @@ from launch.actions import DeclareLaunchArgument, GroupAction, IncludeLaunchDesc
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, PythonExpression
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 
@@ -65,6 +66,17 @@ def generate_launch_description():
                               description='planner：目標へ向かって障害物をよける／script：決まった道筋（直進→左に曲がり続ける）'),
         DeclareLaunchArgument('waypoints', default_value='18,0',
                               description='driver:=planner の目標（map 座標、スタート地点が原点・x が前）。例 "15,0; 15,8"'),
+        # --- 試験用のトラブル（scripts/run_scenarios.py が使う）---
+        DeclareLaunchArgument('layout', default_value='default',
+                              description='障害物の配置: default / gap / narrow / dead_end / clutter（目標は 14,0 を想定）'),
+        DeclareLaunchArgument('gnss_events', default_value='',
+                              description='GNSS の劣化 "開始秒:続く秒:種類; ..."（種類 outage / float / single）'),
+        DeclareLaunchArgument('gnss_jump', default_value='',
+                              description='GNSS が RTK Fix のふりをして 1 回だけ跳ぶ "秒:距離m"'),
+        DeclareLaunchArgument('lidar_drop', default_value='',
+                              description='LiDAR の点群が止まる "開始秒:続く秒; ..."'),
+        DeclareLaunchArgument('imu_bias', default_value='0.0',
+                              description='IMU の回転の速さのずれ [rad/s]'),
         DeclareLaunchArgument('safety', default_value='true',
                               description='true で、前方に障害物があるときに前進を止める（obstacles:=true のときだけ）'),
 
@@ -107,7 +119,7 @@ def generate_launch_description():
             # 安全停止を使うときは /cmd_vel_nav に出し、safety_stop を通して /cmd_vel へ
             Node(
                 package='trc_navigation', executable='local_planner_node', name='local_planner',
-                parameters=[{'waypoints': LaunchConfiguration('waypoints')}],
+                parameters=[{'waypoints': ParameterValue(LaunchConfiguration('waypoints'), value_type=str)}],
                 remappings=[('cmd_vel', cmd_topic)],
                 condition=IfCondition(PythonExpression(["'", LaunchConfiguration('driver'), "' == 'planner'"])),
             ),
@@ -126,6 +138,12 @@ def generate_launch_description():
                     'gnss_outage_start': LaunchConfiguration('gnss_outage_start'),
                     'gnss_outage_duration': LaunchConfiguration('gnss_outage_duration'),
                     'obstacle_ahead': LaunchConfiguration('obstacle_ahead'),
+                    # 文字列のまま渡す（"20:5" が YAML の 60 進数として数字に化けないように）
+                    'layout': ParameterValue(LaunchConfiguration('layout'), value_type=str),
+                    'gnss_events': ParameterValue(LaunchConfiguration('gnss_events'), value_type=str),
+                    'gnss_jump': ParameterValue(LaunchConfiguration('gnss_jump'), value_type=str),
+                    'lidar_drop': ParameterValue(LaunchConfiguration('lidar_drop'), value_type=str),
+                    'imu_bias': ParameterValue(LaunchConfiguration('imu_bias'), value_type=float),
                 }],
             ),
         ]),
