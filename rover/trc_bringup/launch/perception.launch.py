@@ -27,6 +27,8 @@ def generate_launch_description():
                               description='前方を見る帯の幅 [m]（ローバーの幅＋余裕）'),
         DeclareLaunchArgument('safety', default_value='false',
                               description='true で安全停止（前方に障害物があれば前進を止める）を起動する'),
+        DeclareLaunchArgument('imu_topic', default_value='/unilidar/imu',
+                              description='車体の傾きを求める IMU（加速度計）'),
         DeclareLaunchArgument('cmd_in', default_value='/cmd_vel_nav',
                               description='走行制御からの速度指令'),
         DeclareLaunchArgument('cmd_out', default_value='/cmd_vel',
@@ -37,7 +39,8 @@ def generate_launch_description():
                 'stop_distance': LaunchConfiguration('stop_distance'),
                 'corridor_width': LaunchConfiguration('corridor_width'),
             }],
-            remappings=[('pointcloud', LaunchConfiguration('cloud_topic'))],
+            remappings=[('pointcloud', LaunchConfiguration('cloud_topic')),
+                        ('imu', LaunchConfiguration('imu_topic'))],
         ),
         Node(
             package='trc_perception', executable='safety_stop_node', name='safety_stop',

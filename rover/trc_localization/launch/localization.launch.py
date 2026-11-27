@@ -49,7 +49,8 @@ def generate_launch_description():
         Node(
             package='trc_localization', executable='odom_to_twist_node', name='lidar_twist',
             parameters=[common],
-            remappings=[('odometry', lidar_odom), ('twist', '/lidar/twist')],
+            remappings=[('odometry', lidar_odom), ('twist', '/lidar/twist'),
+                        ('cmd_vel', '/cmd_vel'), ('lidar_degenerate', '/lidar/degenerate')],
         ),
         Node(
             package='robot_localization', executable='ekf_node', name='ekf_odom',

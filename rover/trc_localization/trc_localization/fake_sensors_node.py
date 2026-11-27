@@ -131,6 +131,11 @@ class FakeSensors(Node):
         self.world_kind = self.declare_parameter('world', 'default').value
         # true：地形の陰・近いほど多い地面の点・車体の傾きを入れた点群（scan_3d）。false：これまでの簡略版
         self.realistic_cloud = bool(self.declare_parameter('realistic_cloud', True).value)
+        # 地面の点：fixed（world に固定した点。LiDAR オドメトリの手がかりになる）/
+        #           resample（スキャンごとに選び直す。模様のない平らな砂地で、手がかりにならない）
+        self.ground_mode = self.declare_parameter('ground_mode', 'fixed').value
+        if self.ground_mode not in ('fixed', 'resample'):
+            raise ValueError(f'ground_mode は fixed か resample: {self.ground_mode}')
         self.sandy = (not self.terrain.flat) or self.sand.slip > 0.0 or bool(self.sand.soft_sand) \
             or self.dust_rate > 0.0
 
@@ -169,10 +174,10 @@ class FakeSensors(Node):
             self.world = fake_world.place_on(self.terrain, self.world)
             if not self.cloud_ground:
                 self.ground = np.empty((0, 3))
-            elif self.terrain.flat:
-                self.ground = fake_world.make_ground(seed=0)
+            elif self.sandy or self.realistic_cloud:
+                self.ground = fake_world.make_ground_grid(self.terrain, seed=0)
             else:
-                self.ground = fake_world.make_ground_on(self.terrain, seed=0)
+                self.ground = fake_world.make_ground(seed=0)
             self.dust = ft.Dust(self.dust_rate, self.terrain)
             if self.sandy:
                 self.get_logger().info(
@@ -387,7 +392,8 @@ class FakeSensors(Node):
 
     def make_cloud(self, stamp):
         if self.sandy or self.realistic_cloud:
-            pts = fake_world.scan_3d(self.world, self.ground, self.terrain,
+            ground = None if (self.cloud_ground and self.ground_mode == 'resample') else self.ground
+            pts = fake_world.scan_3d(self.world, ground, self.terrain,
                                      np.array([self.e, self.n, self.z]), self.body_rotation(),
                                      self.lidar_x, self.lidar_z, self.cloud_min_range,
                                      self.cloud_max_range, self.cloud_points, self.cloud_noise, self.rng,

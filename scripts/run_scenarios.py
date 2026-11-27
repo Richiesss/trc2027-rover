@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """シミュレーターで色々な状況（シナリオ）を順に走らせ、結果を表にまとめる。
 
-  ./scripts/run_scenarios.sh                    # 全部（20〜30 分）
+  ./scripts/run_scenarios.sh                    # 全部（35〜45 分）
   ./scripts/run_scenarios.sh --only gap,narrow  # 一部だけ
   ./scripts/run_scenarios.sh --list             # シナリオの一覧
 
@@ -73,18 +73,19 @@ SCENARIOS = [
     Scenario('checkpoints_h200', '同じコースを、スタートの向き 東から 200° で', {'layout': 'checkpoints',
              'heading_deg': '200.0'}, course=True, timeout=240.0),
     # --- 砂地（fake_terrain.py）---
-    Scenario('sand_dunes', '砂地：登れる砂丘を 2 つ越えて 18 m 先へ（空転 15 %）',
-             {'terrain': 'dunes', 'slip': '0.15'}, timeout=200.0),
+    Scenario('sand_dunes', '砂地：登れる砂丘を 2 つ越えて 18 m 先へ（空転 15 %、通り道に物はない）',
+             {'layout': 'open', 'terrain': 'dunes', 'slip': '0.15'}, timeout=200.0),
     Scenario('sand_steep', '砂地：登れない急な砂丘（40°）が通り道をふさぐ。回り込んで 16 m 先へ',
-             {'terrain': 'steep', 'slip': '0.15'}, waypoints='16,0', timeout=240.0),
+             {'layout': 'open', 'terrain': 'steep', 'slip': '0.15'}, waypoints='16,0', timeout=240.0),
     Scenario('sand_pit', '砂地：通り道に深さ 1 m のくぼみ（崖のふち）。落ちずに 16 m 先へ',
-             {'terrain': 'pit', 'slip': '0.15'}, waypoints='16,0', timeout=200.0),
+             {'layout': 'open', 'terrain': 'pit', 'slip': '0.15'}, waypoints='16,0', timeout=200.0),
     Scenario('sand_trap', '砂地：見た目では分からないやわらかい砂（半径 1.5 m）にはまる。抜け出して 14 m 先へ',
-             {'soft_sand': '7,0,1.5', 'slip': '0.15'}, waypoints='14,0', timeout=240.0),
+             {'layout': 'open', 'soft_sand': '7,0,1.5', 'slip': '0.15'}, waypoints='14,0', timeout=240.0),
     Scenario('sand_dust', '砂地：舞い上がる砂（1 スキャンに平均 3 塊）の中を 18 m 先へ',
-             {'dust': '3.0', 'slip': '0.1'}, max_safety_stops=3),
-    Scenario('sand_bare', '砂地：周りに何もない砂地で、GNSS が 15 秒後から 30 秒途切れる',
-             {'world': 'bare', 'slip': '0.1', 'gnss_events': '15:30:outage'}, max_pos_err=1.0),
+             {'layout': 'open', 'dust': '3.0', 'slip': '0.1'}, max_safety_stops=3),
+    Scenario('sand_bare', '砂地：周りに何もない模様のない砂地で、GNSS が 15 秒後から 30 秒途切れる',
+             {'world': 'bare', 'ground_mode': 'resample', 'slip': '0.1', 'gnss_events': '15:30:outage'},
+             max_pos_err=1.0),
     Scenario('sand_course', '砂地：砂丘・空転・舞う砂の中で、チェックポイント 2 つを回る',
              {'layout': 'checkpoints', 'terrain': 'dunes', 'slip': '0.15', 'dust': '1.0'},
              course=True, timeout=300.0),

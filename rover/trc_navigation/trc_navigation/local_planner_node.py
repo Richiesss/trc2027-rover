@@ -5,12 +5,14 @@
   /obstacles/points  sensor_msgs/PointCloud2   障害物の点（base_link 座標、obstacle_detector の出力）
   /goal_pose         geometry_msgs/PoseStamped 新しい目標（map 座標）。Foxglove の 3D パネルの「Publish pose」でも送れる
   /planner/set_waypoints nav_msgs/Path         ウェイポイントの並びをまとめて入れ替える（map 座標、mission_node が使う）
+  /terrain/tilt      geometry_msgs/Vector3Stamped 車体の傾き [度]（obstacle_detector が IMU から求める）
+  /odometry/local    nav_msgs/Odometry         odom 座標の位置（はまったかどうかの判断に使う。GNSS の揺れが入らない）
 出力:
   cmd_vel              geometry_msgs/Twist   速度指令（ふつうは /cmd_vel_nav に出し、safety_stop を通す）
   /planner/trajectory  nav_msgs/Path         選んだ指令で進んだときの予測の通り道（base_link）
   /planner/waypoints   nav_msgs/Path         残りのウェイポイント（map）
   /planner/global_path nav_msgs/Path         地図の上で探した、目標までの道筋（map）
-  /planner/map         nav_msgs/OccupancyGrid 見つけた障害物を書きためた地図（map、1 Hz）
+  /planner/map         nav_msgs/OccupancyGrid 見つけた障害物を書きためた地図（map、1 Hz。100 障害物・90 通らない・70 穴）
 
 2 段構え:
   1. 見つけた障害物を map 座標の格子地図に書きため、地図の上で目標までの道筋を A* で探す（1 秒ごと）
@@ -20,6 +22,12 @@
   waypoints:="15,0; 15,8"   のように「x,y」を ; で区切って渡す
 
 前に進める候補がないとき（行き止まり）は、同じ向きにその場で回り続けて抜け道を探す。
+
+砂地の対策:
+  - 砂にはまる：前進の指令を出しているのに stuck_time 秒でほとんど進まなければ「はまった」とみなし、
+    backup_time 秒下がって、はまった所（前方 block_ahead m、半径 block_radius m）を地図で「通らない」にして道を引き直す
+  - 傾きすぎ：車体の傾きが tilt_limit 度を超えたら、同じように下がって、その先を「通らない」にする
+  - 穴・崖のふち：すぐ目の前（watch_near〜watch_far m）なのに地面が見えないマスは、地図で「穴」として通らない
 目標の 2 m 以内まで来て、目標そのものが障害物に近すぎるとわかったら、そのウェイポイントを飛ばす。
 
 注意：DWA は「いま見えている範囲で、数秒先までの動き」しか考えない。長い壁や袋小路では、
@@ -32,7 +40,7 @@ from collections import deque
 
 import numpy as np
 import rclpy
-from geometry_msgs.msg import PoseStamped, Twist
+from geometry_msgs.msg import PoseStamped, Twist, Vector3Stamped
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
@@ -88,6 +96,29 @@ class LocalPlanner(Node):
         self.map_range = dp('map_range', 12.0)   # 地図に書くのはこの距離までの点（遠いほど向きのずれが効く）
         self.pose_buf = deque(maxlen=300)         # (時刻, x, y, yaw)：点群を測った時刻の位置を求めるため
         self.waypoints = parse_waypoints(self.declare_parameter('waypoints', '').value)
+        # --- 砂地の対策 ---
+        self.stuck_time = dp('stuck_time', 3.0)          # この秒数で
+        self.stuck_expected = dp('stuck_expected', 0.6)  # 指令どおりなら これ以上 [m] 進むはずなのに
+        self.stuck_ratio = dp('stuck_ratio', 0.25)       # その割合しか進んでいなければ「はまった」
+        self.backup_speed = dp('backup_speed', 0.3)
+        self.backup_time = dp('backup_time', 2.5)
+        self.block_ahead = dp('block_ahead', 0.8)
+        self.block_radius = dp('block_radius', 0.6)
+        self.tilt_limit = dp('tilt_limit', 18.0)
+        self.max_recoveries = int(self.declare_parameter('max_recoveries', 6).value)
+        self.watch_near = dp('watch_near', 0.8)
+        self.watch_far = dp('watch_far', 1.6)
+        self.watch_fov = math.radians(dp('watch_fov_deg', 45.0))
+        r = np.arange(self.watch_near, self.watch_far + 1e-6, 0.125)
+        a = np.linspace(-self.watch_fov, self.watch_fov, 9)
+        rr, aa = np.meshgrid(r, a)
+        self.watch_base = np.c_[(rr * np.cos(aa)).ravel(), (rr * np.sin(aa)).ravel()]
+        self.progress = deque(maxlen=200)                # (時刻, x, y, 前進の指令 [m/s])
+        self.recovery = None                             # 下がっている間：{'until': 時刻}
+        self.recoveries = 0                              # いまのウェイポイントで下がった回数
+        self.tilt = (0.0, 0.0)
+        self.local_pose = None                           # (x, y, 受信時刻)：odom 座標
+        self.last_v = 0.0
         self.grid = gp.ObstacleGrid(gp.GridParams(inflate=self.p.robot_radius + self.p.safety_margin))
         self.path = None
         self.path_goal = None
@@ -111,6 +142,8 @@ class LocalPlanner(Node):
         self.create_subscription(PointCloud2, '/obstacles/ground', self.on_ground, 5)
         self.create_subscription(PoseStamped, '/goal_pose', self.on_goal, 5)
         self.create_subscription(Bool, '/obstacles/stop', self.on_stop, 10)
+        self.create_subscription(Vector3Stamped, '/terrain/tilt', self.on_tilt, 10)
+        self.create_subscription(Odometry, '/odometry/local', self.on_local, 10)
         self.create_subscription(Path, '/planner/set_waypoints', self.on_set_waypoints,
                                  QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.create_timer(0.1, self.step)
@@ -169,6 +202,13 @@ class LocalPlanner(Node):
         base = base[np.hypot(base[:, 0], base[:, 1]) <= self.map_range] if len(base) else base
         if len(base):
             self.grid.clear(self.base_to_map(base, pose), getattr(self, 'last_obstacles_map', None))
+        self.grid.watch(self.base_to_map(self.watch_base, pose))   # 目の前は地面が見えるはず
+
+    def on_local(self, msg: Odometry):
+        self.local_pose = (msg.pose.pose.position.x, msg.pose.pose.position.y, self.get_clock().now())
+
+    def on_tilt(self, msg: Vector3Stamped):
+        self.tilt = (msg.vector.x, msg.vector.y)
 
     @staticmethod
     def base_to_map(base, pose):
@@ -182,6 +222,7 @@ class LocalPlanner(Node):
             return
         self.waypoints = [(p.pose.position.x, p.pose.position.y) for p in msg.poses]
         self.done_logged = False
+        self.recoveries = 0
         pts = ', '.join(f'({x:.1f}, {y:.1f})' for x, y in self.waypoints)
         self.get_logger().info(f'ウェイポイントを受け取りました（{len(self.waypoints)} 個）: {pts}')
         self.replan()
@@ -229,10 +270,23 @@ class LocalPlanner(Node):
         if math.hypot(*goal) < self.goal_tolerance:
             self.get_logger().info(f'ウェイポイント ({gx:.1f}, {gy:.1f}) に着きました')
             self.waypoints.pop(0)
+            self.recoveries = 0
+            self.replan()
+            return
+        if self.recovery is not None:
+            self.run_recovery()
+            return
+        if self.recoveries > self.max_recoveries:
+            self.get_logger().warn(f'ウェイポイント ({gx:.1f}, {gy:.1f}) の手前で {self.recoveries} 回はまったので、'
+                                   f'あきらめて次へ進みます')
+            self.waypoints.pop(0)
+            self.recoveries = 0
             self.replan()
             return
 
         obs = self.obstacles[0]
+        special = self.grid.special_points(x, y, 5.0)        # 「通らない」所と「穴」も DWA に教える
+        obs_all = np.vstack([obs, dwa.to_base(x, y, yaw, special)]) if len(special) else obs
         if math.hypot(*goal) < 2.0 and len(obs) and \
                 np.hypot(obs[:, 0] - goal[0], obs[:, 1] - goal[1]).min() < self.p.robot_radius + self.p.safety_margin:
             self.get_logger().warn(f'ウェイポイント ({gx:.1f}, {gy:.1f}) は障害物に近すぎて行けないので、次へ進みます')
@@ -245,7 +299,7 @@ class LocalPlanner(Node):
         if self.path is not None and math.hypot(*goal) > self.lookahead:
             tx, ty = gp.lookahead_point(self.path, (x, y), self.lookahead)
             target = dwa.to_base(x, y, yaw, np.array([[tx, ty]]))[0]
-        plan = dwa.plan(obs, target, self.p)
+        plan = dwa.plan(obs_all, target, self.p)
         cmd = Twist()
         if self.stuck_dir == 0.0:
             # ふだん：安全停止がかかっている、または前に進める候補がなければ、その場で回り始める
@@ -261,7 +315,7 @@ class LocalPlanner(Node):
         if self.stuck_dir != 0.0:
             # 回っている間：同じ向きに回り続け、前が余裕をもって空いた状態が続いたら進み始める
             clear = (plan.feasible and not self.safety_stop
-                     and not dwa.front_blocked(obs, (0.0, 0.0, 0.0), self.p, margin=self.release_margin))
+                     and not dwa.front_blocked(obs_all, (0.0, 0.0, 0.0), self.p, margin=self.release_margin))
             self.clear_count = self.clear_count + 1 if clear else 0
             if self.clear_count >= self.resume_cycles:
                 self.stuck_dir = 0.0
@@ -271,6 +325,57 @@ class LocalPlanner(Node):
                 cmd.angular.z = self.stuck_dir * self.stuck_yaw_rate
         self.cmd_pub.publish(cmd)
         self.publish_trajectory(plan.trajectory)
+        self.check_progress(cmd.linear.x, obs_all)
+
+    # --- 砂地の対策：はまった・傾きすぎたら下がる ---
+    def check_progress(self, v_cmd: float, obs):
+        now = self.get_clock().now().nanoseconds * 1e-9
+        # 進んだ距離は odom 座標（LiDAR オドメトリ＋IMU）で測る。map 座標は GNSS の揺れ・跳びで
+        # 引き戻されることがあり、単独測位のときに「はまった」と誤った
+        if self.local_pose is not None and self.age(self.local_pose[2]) < self.data_timeout:
+            x, y = self.local_pose[0], self.local_pose[1]
+        else:
+            x, y = self.pose[0], self.pose[1]
+        v_eff = 0.0 if self.safety_stop else max(v_cmd, 0.0)   # 安全停止中の前進は実際には出ていない
+        self.progress.append((now, x, y, v_eff))
+        self.last_v = v_eff
+        tilt = max(abs(self.tilt[0]), abs(self.tilt[1]))
+        if tilt > self.tilt_limit and v_eff > 0.05:
+            self.start_recovery(f'車体が {tilt:.0f}° 傾いた', obs)
+            return
+        window = [p for p in self.progress if p[0] >= now - self.stuck_time]
+        if not window or window[-1][0] - window[0][0] < self.stuck_time - 0.2:
+            return
+        expected = sum(p[3] for p in window) * 0.1           # 10 Hz
+        moved = math.hypot(window[-1][1] - window[0][1], window[-1][2] - window[0][2])
+        if expected >= self.stuck_expected and moved < self.stuck_ratio * expected:
+            self.start_recovery(f'{self.stuck_time:.0f} 秒で {expected:.1f} m 進むはずが {moved:.2f} m', obs)
+
+    def start_recovery(self, why: str, obs):
+        x, y, yaw, _ = self.pose
+        bx, by = x + self.block_ahead * math.cos(yaw), y + self.block_ahead * math.sin(yaw)
+        self.grid.block(bx, by, self.block_radius)
+        behind = obs[(obs[:, 0] < -0.2) & (obs[:, 0] > -1.6) & (np.abs(obs[:, 1]) < 0.6)] if len(obs) else obs
+        now = self.get_clock().now().nanoseconds * 1e-9
+        backup = len(behind) == 0
+        self.recovery = {'until': now + (self.backup_time if backup else 0.0)}
+        self.recoveries += 1
+        self.get_logger().warn(
+            f'砂にはまったようです（{why}）。' + ('下がって、' if backup else '後ろがふさがっているので下がらずに、')
+            + f'({bx:.1f}, {by:.1f}) のまわりを通らないようにして道を引き直します（{self.recoveries} 回目）')
+        self.progress.clear()
+        self.stuck_dir = 0.0
+
+    def run_recovery(self):
+        now = self.get_clock().now().nanoseconds * 1e-9
+        if now < self.recovery['until']:
+            cmd = Twist()
+            cmd.linear.x = -self.backup_speed
+            self.cmd_pub.publish(cmd)
+            return
+        self.recovery = None
+        self.progress.clear()
+        self.replan()
 
     # --- 地図の上で道筋を探す（1 Hz）---
     def replan(self):
@@ -318,9 +423,11 @@ class LocalPlanner(Node):
         msg.info.width = msg.info.height = g.n
         msg.info.origin.position.x = msg.info.origin.position.y = g.origin
         msg.info.origin.orientation.w = 1.0
-        # OccupancyGrid は行（y）ごとに並べる。ふさがり 100、見えたが少ない 30、それ以外 0
+        # OccupancyGrid は行（y）ごとに並べる。ふさがり 100、通らない（はまった所）90、穴 70、見えたが少ない 30、それ以外 0
         hits = g.hits.T
         data = np.where(hits >= g.p.hits_to_occupy, 100, np.where(hits > 0, 30, 0)).astype(np.int8)
+        data = np.where(g.hazard().T, 70, data).astype(np.int8)
+        data = np.where(g.blocked.T, 90, data).astype(np.int8)
         msg.data = data.ravel().tolist()
         self.map_pub.publish(msg)
 
