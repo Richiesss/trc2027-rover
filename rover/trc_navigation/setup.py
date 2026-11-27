@@ -20,6 +20,7 @@ setup(
     entry_points={
         'console_scripts': [
             'local_planner_node = trc_navigation.local_planner_node:main',
+            'mission_node = trc_navigation.mission_node:main',
         ],
     },
 )

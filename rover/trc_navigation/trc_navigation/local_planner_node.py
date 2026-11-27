@@ -4,6 +4,7 @@
   /odometry/global   nav_msgs/Odometry         いまの位置と向き（map 座標、位置推定の出力）
   /obstacles/points  sensor_msgs/PointCloud2   障害物の点（base_link 座標、obstacle_detector の出力）
   /goal_pose         geometry_msgs/PoseStamped 新しい目標（map 座標）。Foxglove の 3D パネルの「Publish pose」でも送れる
+  /planner/set_waypoints nav_msgs/Path         ウェイポイントの並びをまとめて入れ替える（map 座標、mission_node が使う）
 出力:
   cmd_vel              geometry_msgs/Twist   速度指令（ふつうは /cmd_vel_nav に出し、safety_stop を通す）
   /planner/trajectory  nav_msgs/Path         選んだ指令で進んだときの予測の通り道（base_link）
@@ -35,6 +36,7 @@ from geometry_msgs.msg import PoseStamped, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile
 from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2 as pc2
 from std_msgs.msg import Bool
@@ -109,6 +111,8 @@ class LocalPlanner(Node):
         self.create_subscription(PointCloud2, '/obstacles/ground', self.on_ground, 5)
         self.create_subscription(PoseStamped, '/goal_pose', self.on_goal, 5)
         self.create_subscription(Bool, '/obstacles/stop', self.on_stop, 10)
+        self.create_subscription(Path, '/planner/set_waypoints', self.on_set_waypoints,
+                                 QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.create_timer(0.1, self.step)
         self.create_timer(1.0, self.replan)
         if self.waypoints:
@@ -171,6 +175,16 @@ class LocalPlanner(Node):
         x, y, yaw = pose
         c, s = math.cos(yaw), math.sin(yaw)
         return np.c_[x + c * base[:, 0] - s * base[:, 1], y + s * base[:, 0] + c * base[:, 1]]
+
+    def on_set_waypoints(self, msg: Path):
+        if msg.header.frame_id not in ('', 'map'):
+            self.get_logger().warn(f'ウェイポイントの座標系 {msg.header.frame_id} は使えません（map で送ってください）')
+            return
+        self.waypoints = [(p.pose.position.x, p.pose.position.y) for p in msg.poses]
+        self.done_logged = False
+        pts = ', '.join(f'({x:.1f}, {y:.1f})' for x, y in self.waypoints)
+        self.get_logger().info(f'ウェイポイントを受け取りました（{len(self.waypoints)} 個）: {pts}')
+        self.replan()
 
     def on_stop(self, msg: Bool):
         self.safety_stop = msg.data

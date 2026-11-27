@@ -77,7 +77,7 @@ def make_rock(x: float, y: float, size: float = 0.8, height: float = 0.5, seed: 
 # 試験用の配置。座標はスタート地点が原点、x がスタート時の前方、y が左（map 座標と同じ）。
 # 置く前に、この範囲にある元の仮想フィールドの物体は取り除く（配置どうしが混ざらないように）。
 LAYOUT_ZONE = ((1.0, 17.0), (-8.0, 8.0))
-LAYOUTS = ('default', 'gap', 'narrow', 'dead_end', 'clutter')
+LAYOUTS = ('default', 'gap', 'narrow', 'dead_end', 'clutter', 'checkpoints')
 
 
 def _wall(rng, x0, y0, x1, y1, height=0.6, thickness=0.3, density=300):
@@ -87,12 +87,33 @@ def _wall(rng, x0, y0, x1, y1, height=0.6, thickness=0.3, density=300):
                 math.atan2(y1 - y0, x1 - x0), max(50, int(density * length)))
 
 
+# 自律ミッションの試験用のマーカー（map 座標）。チェックポイントは 2 本のマーカーを結んだ線分
+CHECKPOINT_MARKERS = {2: (7.0, -1.5), 5: (7.0, 1.5),      # CP1：まっすぐ横切る（間 3.0 m）
+                      3: (13.0, -5.5), 7: (15.5, -4.0)}   # CP2：斜めの線分（間 2.9 m）
+CHECKPOINT_ROUTE = [{'checkpoint': [2, 5], 'name': 'CP1'},
+                    {'checkpoint': [3, 7], 'name': 'CP2'},
+                    {'latlon_map': (4.0, -7.0), 'name': '最後の地点'}]
+
+
+def map_to_latlon(x: float, y: float, lat0: float, lon0: float, heading0: float, radius: float = 6378137.0):
+    """シミュレーターの map 座標（スタート地点が原点、x がスタート時の前方）を緯度・経度にする。
+
+    fake_sensors_node の GNSS と同じ近似（スタート地点のまわりの平面）を使う。
+    """
+    c, s = math.cos(heading0), math.sin(heading0)
+    e, n = c * x - s * y, s * x + c * y
+    lat = lat0 + math.degrees(n / radius)
+    lon = lon0 + math.degrees(e / (radius * math.cos(math.radians(lat0))))
+    return lat, lon
+
+
 def make_layout(name: str, seed: int = 0) -> np.ndarray:
     """試験用の障害物の配置（map 座標）。目標は (14, 0) を想定。
 
     gap      : x = 7 に横長の壁。真ん中に幅 2.0 m のすき間（通れる）
     narrow   : 同じ壁で、すき間は幅 1.0 m（ローバーには狭すぎる。壁の端を回る必要がある）
     dead_end : スタート側に口を開けた U 字（奥行き 5 m・幅 4 m）。まっすぐ行くと袋小路
+    checkpoints : 自律ミッションのチェックポイント用のマーカーの柱（CHECKPOINT_MARKERS）
     clutter  : x = 4〜9.6 に、千鳥の格子に沿って岩を 11 個ばらまく（岩どうしの間は 1.4 m 以上）
     """
     rng = np.random.default_rng(seed + 3000)
@@ -104,6 +125,9 @@ def make_layout(name: str, seed: int = 0) -> np.ndarray:
     if name == 'dead_end':
         return np.vstack([_wall(rng, 4.0, 2.0, 9.0, 2.0), _wall(rng, 4.0, -2.0, 9.0, -2.0),
                           _wall(rng, 9.0, -2.0, 9.0, 2.0)])
+    if name == 'checkpoints':
+        # ArUco マーカーの柱（20 cm 角・高さ 1.2 m）。LiDAR から障害物として見える
+        return np.vstack([_box(rng, x, y, 0.2, 0.2, 1.2, 0.0, 300) for x, y in CHECKPOINT_MARKERS.values()])
     if name == 'clutter':
         # 千鳥に並べた格子（間隔 2.8 m）に少しずらして岩を置く。岩どうしの間は 1.4 m 以上空く
         rocks = []

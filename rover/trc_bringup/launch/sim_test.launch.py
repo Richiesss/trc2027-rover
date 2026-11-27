@@ -5,6 +5,8 @@
   ros2 launch trc_bringup sim_test.launch.py gnss_outage_start:=25.0   # 25 秒後から 10 秒間 GNSS を切る
   ros2 launch trc_bringup sim_test.launch.py obstacle_ahead:=6.0       # 6 m 先に岩を置く（よけて 18 m 先へ。途中の長い壁も回り込む）
   ros2 launch trc_bringup sim_test.launch.py waypoints:="15,0; 15,10; 0,10; 0,0"   # 四角く回る
+  ros2 launch trc_bringup sim_test.launch.py layout:=checkpoints mission:=<ミッションファイル>  # 緯度・経度のチェックポイント
+    （ミッションファイルの例は scripts/make_sim_mission.py で作れる）
   ros2 launch trc_bringup sim_test.launch.py driver:=script obstacle_ahead:=6.0      # 決まった道筋（手前で止まるだけ）
 
 起動するもの:
@@ -77,6 +79,8 @@ def generate_launch_description():
                               description='LiDAR の点群が止まる "開始秒:続く秒; ..."'),
         DeclareLaunchArgument('imu_bias', default_value='0.0',
                               description='IMU の回転の速さのずれ [rad/s]'),
+        DeclareLaunchArgument('mission', default_value='',
+                              description='自律ミッションのファイル（緯度・経度のチェックポイント）。指定すると waypoints は使わない'),
         DeclareLaunchArgument('safety', default_value='true',
                               description='true で、前方に障害物があるときに前進を止める（obstacles:=true のときだけ）'),
 
@@ -119,9 +123,17 @@ def generate_launch_description():
             # 安全停止を使うときは /cmd_vel_nav に出し、safety_stop を通して /cmd_vel へ
             Node(
                 package='trc_navigation', executable='local_planner_node', name='local_planner',
-                parameters=[{'waypoints': ParameterValue(LaunchConfiguration('waypoints'), value_type=str)}],
+                # mission を指定したときは、ウェイポイントは mission_node から受け取る
+                parameters=[{'waypoints': ParameterValue(PythonExpression(
+                    ["'' if '", LaunchConfiguration('mission'), "' else '", LaunchConfiguration('waypoints'), "'"]),
+                    value_type=str)}],
                 remappings=[('cmd_vel', cmd_topic)],
                 condition=IfCondition(PythonExpression(["'", LaunchConfiguration('driver'), "' == 'planner'"])),
+            ),
+            Node(
+                package='trc_navigation', executable='mission_node', name='mission',
+                parameters=[{'mission_file': LaunchConfiguration('mission')}],
+                condition=IfCondition(PythonExpression(["'", LaunchConfiguration('mission'), "' != ''"])),
             ),
             Node(
                 package='trc_localization', executable='scripted_driver_node', name='scripted_driver',
