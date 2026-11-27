@@ -14,6 +14,13 @@
   （/gnss/quality は gnss_adapter_node が作る）
   /fake/world     sensor_msgs/PointCloud2 仮想フィールド全体（map 座標、表示用、10 秒ごと）
   /fake/truth_path nav_msgs/Path          本当に通った道筋（map 座標、表示用）
+  /fake/obstacles  sensor_msgs/PointCloud2 物体だけの点（map 座標、地面を除く。シナリオ試験の最接近の計算用）
+
+砂地の試験（terrain・slip・soft_sand・dust・world。fake_terrain.py）:
+  terrain:=dunes / steep / pit で砂丘やくぼみを置く。車体は地面に沿って傾き、
+  LiDAR の点群も傾く。IMU は重力の向き（linear_acceleration）も出す。
+  登り坂・やわらかい砂ではタイヤが空転して、指令どおりに進まない。
+  転倒・転落したら「転倒しました」「転落しました」とログに出して止まる。
 
 drive_mode:=cmd_vel のときは /cmd_vel（geometry_msgs/Twist）の速度指令どおりに動く。
 
@@ -30,10 +37,12 @@ from geometry_msgs.msg import PoseStamped, Twist
 from nav_msgs.msg import Odometry, Path
 from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.qos import DurabilityPolicy, QoSProfile
+from std_msgs.msg import String
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from sensor_msgs.msg import Imu, NavSatFix, NavSatStatus, PointCloud2, PointField
 
+from trc_localization import fake_terrain as ft
 from trc_localization import fake_world
 from trc_localization import heading_math as hm
 
@@ -105,6 +114,26 @@ class FakeSensors(Node):
         # IMU の回転の速さのずれ [rad/s]（0.01 で 1 分に 34°）
         self.imu_bias = float(self.declare_parameter('imu_bias', 0.0, any_number).value)
 
+        # --- 砂地の試験（fake_terrain.py）---
+        # 地形：flat（これまでどおり、車体は水平）/ dunes / steep / pit
+        self.terrain = ft.Terrain(self.declare_parameter('terrain', 'flat').value, self.heading0)
+        sd = ft.SandParams()
+        self.sand = ft.SandParams(
+            slip=float(self.declare_parameter('slip', sd.slip, any_number).value),
+            max_climb_deg=float(self.declare_parameter('max_climb_deg', sd.max_climb_deg, any_number).value),
+            tip_deg=float(self.declare_parameter('tip_deg', sd.tip_deg, any_number).value),
+            # やわらかい砂 "x,y,半径; ..."（map 座標）。見た目では分からず、はまると前に進めない
+            soft_sand=ft.parse_circles(self.declare_parameter('soft_sand', '').value),
+        )
+        # 舞い上がる砂：1 回のスキャンあたりの砂の塊の数の平均
+        self.dust_rate = float(self.declare_parameter('dust', 0.0, any_number).value)
+        # 周りの物体：default（支柱・岩・壁を散らばらせる）/ bare（何もない砂地。LiDAR の手がかりが少ない）
+        self.world_kind = self.declare_parameter('world', 'default').value
+        # true：地形の陰・近いほど多い地面の点・車体の傾きを入れた点群（scan_3d）。false：これまでの簡略版
+        self.realistic_cloud = bool(self.declare_parameter('realistic_cloud', True).value)
+        self.sandy = (not self.terrain.flat) or self.sand.slip > 0.0 or bool(self.sand.soft_sand) \
+            or self.dust_rate > 0.0
+
         self.odom_pub = self.create_publisher(Odometry, '/lidar/odom', 10)
         self.imu_pub = self.create_publisher(Imu, '/unilidar/imu', 10)
         # gnss_fix と同じ分け方で出す（/gnss/fix = RTK Fix、/gnss = それ以外、/gnss/best = 有効なものすべて）
@@ -117,12 +146,19 @@ class FakeSensors(Node):
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.world_pub = self.create_publisher(PointCloud2, '/fake/world', latched)
         self.truth_path_pub = self.create_publisher(Path, '/fake/truth_path', 10)
+        self.objects_pub = self.create_publisher(PointCloud2, '/fake/obstacles', latched)
+        self.event_pub = self.create_publisher(String, '/fake/event', latched)
         self.truth_path = Path()
         self.truth_path.header.frame_id = 'map'
 
         if self.publish_cloud:
             self.rng = np.random.default_rng(0)
-            self.world = fake_world.make_world(seed=0)
+            if self.world_kind == 'bare':
+                self.world = np.empty((0, 3))
+            elif self.world_kind == 'default':
+                self.world = fake_world.make_world(seed=0)
+            else:
+                raise ValueError(f'world は default か bare: {self.world_kind}')
             if self.layout != 'default':
                 self.world = self.apply_layout(self.world, self.layout)
             if self.obstacle_ahead > 0.0:
@@ -130,7 +166,19 @@ class FakeSensors(Node):
                 rock = fake_world.make_rock(d * math.cos(self.heading0), d * math.sin(self.heading0))
                 self.world = np.vstack([self.world, rock])
                 self.get_logger().info(f'通り道の {d:.1f} m 先に岩を置きました（ローバーは通り抜けます）')
-            self.ground = fake_world.make_ground(seed=0) if self.cloud_ground else np.empty((0, 3))
+            self.world = fake_world.place_on(self.terrain, self.world)
+            if not self.cloud_ground:
+                self.ground = np.empty((0, 3))
+            elif self.terrain.flat:
+                self.ground = fake_world.make_ground(seed=0)
+            else:
+                self.ground = fake_world.make_ground_on(self.terrain, seed=0)
+            self.dust = ft.Dust(self.dust_rate, self.terrain)
+            if self.sandy:
+                self.get_logger().info(
+                    f'砂地: 地形 {self.terrain.kind}、空転 {self.sand.slip:.2f}、'
+                    f'やわらかい砂 {len(self.sand.soft_sand)} か所、舞う砂 {self.dust_rate:.1f} 塊/スキャン、'
+                    f'周り {self.world_kind}')
             self.get_logger().info(f'仮想フィールドを作りました（{len(self.world)} 点）')
             self.publish_world()
             self.create_timer(10.0, self.publish_world)   # あとから接続した表示ツールにも届くように
@@ -138,6 +186,11 @@ class FakeSensors(Node):
         # 本当の状態（ENU: 東 x, 北 y）
         self.t = 0.0
         self.e, self.n, self.yaw = 0.0, 0.0, self.heading0
+        self.z, self.pitch, self.roll = 0.0, 0.0, 0.0
+        if not self.terrain.flat:
+            self.z, self.pitch, self.roll = self.terrain.pose(self.e, self.n, self.yaw)
+        self.dead = None                      # 転倒・転落したら、その理由
+        self.slip_now = 0.0
         self.dt = 0.02
         self.tick = 0
         self.last_time = None
@@ -170,9 +223,19 @@ class FakeSensors(Node):
         dt = min(max(dt, 0.0), 0.1)
         self.last_time = clock_now
         v, w = self.velocity(clock_now)
+        if self.dead:
+            v, w = 0.0, 0.0
+        if self.sandy:
+            mx, my = self.enu_to_map(self.e, self.n)
+            s = ft.slip_ratio(self.sand, v, self.pitch, ft.soft_depth_in(self.sand, mx, my))
+            self.slip_now = s
+            v, w = v * (1.0 - s) * math.cos(self.pitch), w * (1.0 - 0.5 * s)   # 坂では水平に進む分が減る
         self.yaw += w * dt
         self.e += v * math.cos(self.yaw) * dt
         self.n += v * math.sin(self.yaw) * dt
+        if not self.terrain.flat:
+            self.z, self.pitch, self.roll = self.terrain.pose(self.e, self.n, self.yaw)
+            self.check_alive()
         self.t += dt
         self.tick += 1
         now = clock_now.to_msg()
@@ -180,7 +243,16 @@ class FakeSensors(Node):
         imu = Imu()                                 # 50 Hz
         imu.header.stamp = now
         imu.header.frame_id = 'unilidar_imu'
-        imu.angular_velocity.z = w + self.imu_bias
+        # 車体に固定した IMU：回転の速さ（傾いていれば z 軸の分だけ）と、重力の向き（静止時の加速度計の読み）
+        rot = self.body_rotation()
+        gyro = rot.T @ np.array([0.0, 0.0, w])
+        acc = rot.T @ np.array([0.0, 0.0, 9.81])
+        imu.angular_velocity.x, imu.angular_velocity.y = float(gyro[0]), float(gyro[1])
+        imu.angular_velocity.z = float(gyro[2]) + self.imu_bias
+        imu.linear_acceleration.x = float(acc[0]) + random.gauss(0.0, 0.05)
+        imu.linear_acceleration.y = float(acc[1]) + random.gauss(0.0, 0.05)
+        imu.linear_acceleration.z = float(acc[2]) + random.gauss(0.0, 0.05)
+        imu.linear_acceleration_covariance = [0.0025, 0.0, 0.0, 0.0, 0.0025, 0.0, 0.0, 0.0, 0.0025]
         imu.angular_velocity_covariance = [1e-4, 0.0, 0.0, 0.0, 1e-4, 0.0, 0.0, 0.0, 1e-4]
         imu.orientation_covariance[0] = -1.0         # 向きは出さない（北の基準がない）
         self.imu_pub.publish(imu)
@@ -248,6 +320,22 @@ class FakeSensors(Node):
             self.truth_path.header.stamp = now
             self.truth_path_pub.publish(self.truth_path)
 
+    def body_rotation(self):
+        return ft.rotation(self.yaw, self.pitch, self.roll)
+
+    def check_alive(self):
+        if self.dead:
+            return
+        tilt = math.degrees(max(abs(self.pitch), abs(self.roll)))
+        x, y = self.enu_to_map(self.e, self.n)
+        if self.terrain.in_pit(self.e, self.n):
+            self.dead = '転落'
+        elif tilt > self.sand.tip_deg:
+            self.dead = '転倒'
+        if self.dead:
+            self.get_logger().error(f'{self.dead}しました（map ({x:.1f}, {y:.1f})、傾き {tilt:.0f}°）。もう動けません')
+            self.event_pub.publish(String(data=self.dead))
+
     def publish_gnss(self, msg, fixed: bool):
         (self.gnss_fixed_pub if fixed else self.gnss_other_pub).publish(msg)
         self.gnss_best_pub.publish(msg)
@@ -291,10 +379,20 @@ class FakeSensors(Node):
         c, s = math.cos(-self.heading0), math.sin(-self.heading0)
         mx = c * pts[:, 0] - s * pts[:, 1]
         my = s * pts[:, 0] + c * pts[:, 1]
-        self.world_pub.publish(self.to_cloud(np.c_[mx, my, pts[:, 2]].astype(np.float32),
-                                             self.get_clock().now().to_msg(), 'map'))
+        stamp = self.get_clock().now().to_msg()
+        self.world_pub.publish(self.to_cloud(np.c_[mx, my, pts[:, 2]].astype(np.float32), stamp, 'map'))
+        ox = c * objects[:, 0] - s * objects[:, 1]
+        oy = s * objects[:, 0] + c * objects[:, 1]
+        self.objects_pub.publish(self.to_cloud(np.c_[ox, oy, objects[:, 2]].astype(np.float32), stamp, 'map'))
 
     def make_cloud(self, stamp):
+        if self.sandy or self.realistic_cloud:
+            pts = fake_world.scan_3d(self.world, self.ground, self.terrain,
+                                     np.array([self.e, self.n, self.z]), self.body_rotation(),
+                                     self.lidar_x, self.lidar_z, self.cloud_min_range,
+                                     self.cloud_max_range, self.cloud_points, self.cloud_noise, self.rng,
+                                     extra=self.dust.step(self.e, self.n))
+            return self.to_cloud(pts, stamp, 'unilidar_lidar')
         pts = fake_world.scan(self.world, self.ground, self.e, self.n, self.yaw,
                               self.lidar_x, self.lidar_z, self.cloud_min_range,
                               self.cloud_max_range, self.cloud_points, self.cloud_noise, self.rng)
