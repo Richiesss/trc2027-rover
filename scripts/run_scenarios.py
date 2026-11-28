@@ -168,10 +168,12 @@ class Monitor:
                                      QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)),
             node.create_subscription(PointCloud2, '/fake/obstacles', self.on_objects,
                                      QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)),
-            node.create_subscription(String, '/fake/event', self.on_event,
-                                     QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)),
+            node.create_subscription(String, '/fake/event', self.on_event, 10),
         ]
         self.start = time.monotonic()
+        self.start_wall = time.time()
+        self.end_reason = None
+        self.end_elapsed = 0.0
 
     def destroy(self):
         for s in self.subs:
@@ -239,6 +241,9 @@ class Monitor:
         self.safety_on = msg.data
 
     def on_log(self, msg):
+        # 前のシナリオの残りのログ（遅れて届いたもの）は数えない
+        if msg.stamp.sec + msg.stamp.nanosec * 1e-9 < self.start_wall - 1.0:
+            return
         if msg.name == 'mission' and 'ミッション完了' in msg.msg and self.mission_done is None:
             self.mission_done = time.monotonic() - self.start
         if msg.name != 'local_planner':
@@ -284,10 +289,19 @@ def run_one(node, sc: Scenario, log_dir: Path, timeout_scale: float):
         try:
             def finished():
                 return mon.mission_done is not None if sc.course else mon.done_time is not None
-            while time.monotonic() - mon.start < limit and not finished() and mon.dead is None:
-                rclpy.spin_once(node, timeout_sec=0.1)
-                if proc.poll() is not None:
+            while True:
+                if finished():
+                    mon.end_reason = 'finished'
+                elif mon.dead is not None:
+                    mon.end_reason = f'{mon.dead}の知らせ'
+                elif time.monotonic() - mon.start >= limit:
+                    mon.end_reason = f'時間切れ（{limit:.0f} 秒）'
+                elif proc.poll() is not None:
+                    mon.end_reason = f'launch が終わった（終了コード {proc.returncode}）'
+                if mon.end_reason:
                     break
+                rclpy.spin_once(node, timeout_sec=0.1)
+            mon.end_elapsed = time.monotonic() - mon.start
             # 終わったあと少しだけ待って、最後の道筋も受け取る
             end = time.monotonic() + 1.5
             while time.monotonic() < end:
@@ -328,6 +342,10 @@ def run_one(node, sc: Scenario, log_dir: Path, timeout_scale: float):
             problems.append(f'{"・".join(missed)} を跨ぎ切っていない')
     if mon.dead:
         problems.append(f'{mon.dead}した')
+    if mon.end_reason != 'finished' and not mon.end_reason.startswith('時間切れ'):
+        problems.append(f'試験が {mon.end_elapsed:.0f} 秒で止まった（{mon.end_reason}）')
+    elif mon.end_reason.startswith('時間切れ'):
+        problems.append(mon.end_reason)
     if sc.max_safety_stops is not None and mon.safety_count > sc.max_safety_stops:
         problems.append(f'安全停止 {mon.safety_count} 回 > {sc.max_safety_stops} 回')
     if not math.isnan(clear) and clear < ROBOT_RADIUS:

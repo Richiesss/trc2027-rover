@@ -152,7 +152,7 @@ class FakeSensors(Node):
         self.world_pub = self.create_publisher(PointCloud2, '/fake/world', latched)
         self.truth_path_pub = self.create_publisher(Path, '/fake/truth_path', 10)
         self.objects_pub = self.create_publisher(PointCloud2, '/fake/obstacles', latched)
-        self.event_pub = self.create_publisher(String, '/fake/event', latched)
+        self.event_pub = self.create_publisher(String, '/fake/event', 10)   # 転倒・転落の間、毎回出す（残らない）
         self.truth_path = Path()
         self.truth_path.header.frame_id = 'map'
 
@@ -230,6 +230,7 @@ class FakeSensors(Node):
         v, w = self.velocity(clock_now)
         if self.dead:
             v, w = 0.0, 0.0
+            self.event_pub.publish(String(data=self.dead))
         if self.sandy:
             mx, my = self.enu_to_map(self.e, self.n)
             s = ft.slip_ratio(self.sand, v, self.pitch, ft.soft_depth_in(self.sand, mx, my))
