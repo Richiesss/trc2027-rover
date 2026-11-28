@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """シミュレーターで色々な状況（シナリオ）を順に走らせ、結果を表にまとめる。
 
-  ./scripts/run_scenarios.sh                    # 全部（20〜30 分）
+  ./scripts/run_scenarios.sh                    # 全部（35〜45 分）
   ./scripts/run_scenarios.sh --only gap,narrow  # 一部だけ
   ./scripts/run_scenarios.sh --list             # シナリオの一覧
 
@@ -11,6 +11,7 @@
   位置誤差 : 推定位置と本当の位置の差（平均・最大）
   向き誤差 : 推定の向き（/odometry/global）と本当の向きの差の最大
   安全停止 : 安全停止がかかった回数
+  転倒・転落: 砂地のシナリオで、車体が転倒したり、くぼみに落ちたりしたら不合格
 結果は ~/trc2027/logs/scenarios_<日時>.md と .csv に保存する。
 """
 
@@ -42,6 +43,7 @@ class Scenario:
     max_pos_err: float = 0.5        # これを超えたら不合格 [m]
     expect_reach: bool = True
     course: bool = False            # True：緯度・経度のチェックポイントを回る（mission_node）
+    max_safety_stops: int = None    # 安全停止がこの回数を超えたら不合格（舞う砂でむやみに止まらないか）
 
 
 SCENARIOS = [
@@ -70,6 +72,23 @@ SCENARIOS = [
              course=True, timeout=240.0),
     Scenario('checkpoints_h200', '同じコースを、スタートの向き 東から 200° で', {'layout': 'checkpoints',
              'heading_deg': '200.0'}, course=True, timeout=240.0),
+    # --- 砂地（fake_terrain.py）---
+    Scenario('sand_dunes', '砂地：登れる砂丘を 2 つ越えて 18 m 先へ（空転 15 %、通り道に物はない）',
+             {'layout': 'open', 'terrain': 'dunes', 'slip': '0.15'}, timeout=200.0),
+    Scenario('sand_steep', '砂地：登れない急な砂丘（40°）が通り道をふさぐ。回り込んで 16 m 先へ',
+             {'layout': 'open', 'terrain': 'steep', 'slip': '0.15'}, waypoints='16,0', timeout=240.0),
+    Scenario('sand_pit', '砂地：通り道に深さ 1 m のくぼみ（崖のふち）。落ちずに 16 m 先へ',
+             {'layout': 'open', 'terrain': 'pit', 'slip': '0.15'}, waypoints='16,0', timeout=200.0),
+    Scenario('sand_trap', '砂地：見た目では分からないやわらかい砂（半径 1.5 m）にはまる。抜け出して 14 m 先へ',
+             {'layout': 'open', 'soft_sand': '7,0,1.5', 'slip': '0.15'}, waypoints='14,0', timeout=240.0),
+    Scenario('sand_dust', '砂地：舞い上がる砂（1 スキャンに平均 3 塊）の中を 18 m 先へ',
+             {'layout': 'open', 'dust': '3.0', 'slip': '0.1'}, max_safety_stops=3),
+    Scenario('sand_bare', '砂地：周りに何もない模様のない砂地で、GNSS が 15 秒後から 30 秒途切れる',
+             {'world': 'bare', 'ground_mode': 'resample', 'slip': '0.1', 'gnss_events': '15:30:outage'},
+             max_pos_err=1.0),
+    Scenario('sand_course', '砂地：砂丘・空転・舞う砂の中で、チェックポイント 2 つを回る',
+             {'layout': 'checkpoints', 'terrain': 'dunes', 'slip': '0.15', 'dust': '1.0'},
+             course=True, timeout=300.0),
 ]
 HALF_LENGTH = 0.6                   # 機体の長さ 1.2 m（規定の上限）の半分
 
@@ -122,7 +141,7 @@ class Monitor:
         from rcl_interfaces.msg import Log
         from rclpy.qos import DurabilityPolicy, QoSProfile
         from sensor_msgs.msg import PointCloud2
-        from std_msgs.msg import Bool, Float64
+        from std_msgs.msg import Bool, Float64, String
         self.node = node
         self.pos_err = []
         self.yaw_err = []
@@ -137,6 +156,8 @@ class Monitor:
         self.skipped = 0
         self.stuck = 0
         self.mission_done = None
+        self.objects = None
+        self.dead = None
         self.subs = [
             node.create_subscription(Float64, '/fake/position_error', lambda m: self.pos_err.append(m.data), 50),
             node.create_subscription(PathMsg, '/fake/truth_path', self.on_truth, 5),
@@ -145,8 +166,14 @@ class Monitor:
             node.create_subscription(Log, '/rosout', self.on_log, 100),
             node.create_subscription(PointCloud2, '/fake/world', self.on_world,
                                      QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)),
+            node.create_subscription(PointCloud2, '/fake/obstacles', self.on_objects,
+                                     QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)),
+            node.create_subscription(String, '/fake/event', self.on_event, 10),
         ]
         self.start = time.monotonic()
+        self.start_wall = time.time()
+        self.end_reason = None
+        self.end_elapsed = 0.0
 
     def destroy(self):
         for s in self.subs:
@@ -156,6 +183,15 @@ class Monitor:
         from sensor_msgs_py import point_cloud2 as pc2
         pts = pc2.read_points_numpy(msg, field_names=('x', 'y', 'z'))
         self.world = pts[pts[:, 2] > 0.15][:, :2].astype(float)
+
+    def on_objects(self, msg):
+        from sensor_msgs_py import point_cloud2 as pc2
+        pts = pc2.read_points_numpy(msg, field_names=('x', 'y'))
+        self.objects = np.asarray(pts, dtype=float).reshape(-1, 2)
+
+    def on_event(self, msg):
+        if self.dead is None:
+            self.dead = msg.data
 
     def on_est(self, msg):
         t = stamp_of(msg.header)
@@ -205,6 +241,9 @@ class Monitor:
         self.safety_on = msg.data
 
     def on_log(self, msg):
+        # 前のシナリオの残りのログ（遅れて届いたもの）は数えない
+        if msg.stamp.sec + msg.stamp.nanosec * 1e-9 < self.start_wall - 1.0:
+            return
         if msg.name == 'mission' and 'ミッション完了' in msg.msg and self.mission_done is None:
             self.mission_done = time.monotonic() - self.start
         if msg.name != 'local_planner':
@@ -217,10 +256,13 @@ class Monitor:
             self.stuck += 1
 
     def clearance(self):
-        if self.world is None or not self.truth:
+        # 物体だけの点（/fake/obstacles）があればそれを使う（砂丘の地面を障害物と数えないように）
+        w = self.objects if self.objects is not None else self.world
+        if w is None or not self.truth:
             return float('nan')
+        if len(w) == 0:
+            return float('inf')
         t = np.array(self.truth)
-        w = self.world
         best = float('inf')
         for k in range(0, len(t), 200):                 # メモリを使いすぎないよう分けて計算
             seg = t[k:k + 200]
@@ -247,10 +289,19 @@ def run_one(node, sc: Scenario, log_dir: Path, timeout_scale: float):
         try:
             def finished():
                 return mon.mission_done is not None if sc.course else mon.done_time is not None
-            while time.monotonic() - mon.start < limit and not finished():
-                rclpy.spin_once(node, timeout_sec=0.1)
-                if proc.poll() is not None:
+            while True:
+                if finished():
+                    mon.end_reason = 'finished'
+                elif mon.dead is not None:
+                    mon.end_reason = f'{mon.dead}の知らせ'
+                elif time.monotonic() - mon.start >= limit:
+                    mon.end_reason = f'時間切れ（{limit:.0f} 秒）'
+                elif proc.poll() is not None:
+                    mon.end_reason = f'launch が終わった（終了コード {proc.returncode}）'
+                if mon.end_reason:
                     break
+                rclpy.spin_once(node, timeout_sec=0.1)
+            mon.end_elapsed = time.monotonic() - mon.start
             # 終わったあと少しだけ待って、最後の道筋も受け取る
             end = time.monotonic() + 1.5
             while time.monotonic() < end:
@@ -289,6 +340,14 @@ def run_one(node, sc: Scenario, log_dir: Path, timeout_scale: float):
         missed = [n for n, ok in results if not ok]
         if missed:
             problems.append(f'{"・".join(missed)} を跨ぎ切っていない')
+    if mon.dead:
+        problems.append(f'{mon.dead}した')
+    if mon.end_reason != 'finished' and not mon.end_reason.startswith('時間切れ'):
+        problems.append(f'試験が {mon.end_elapsed:.0f} 秒で止まった（{mon.end_reason}）')
+    elif mon.end_reason.startswith('時間切れ'):
+        problems.append(mon.end_reason)
+    if sc.max_safety_stops is not None and mon.safety_count > sc.max_safety_stops:
+        problems.append(f'安全停止 {mon.safety_count} 回 > {sc.max_safety_stops} 回')
     if not math.isnan(clear) and clear < ROBOT_RADIUS:
         problems.append(f'接触（{clear:.2f} m）')
     if np.nanmax(pe) > sc.max_pos_err:

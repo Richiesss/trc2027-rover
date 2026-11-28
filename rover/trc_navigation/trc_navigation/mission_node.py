@@ -75,6 +75,7 @@ class MissionNode(Node):
         self.create_subscription(Imu, '/heading/imu', self.on_heading, 10)
         self.create_subscription(Path, '/planner/waypoints', self.on_remaining, 10)
         self.from_ll = self.create_client(FromLL, 'fromLL')
+        self.convert_timeout = float(self.declare_parameter('convert_timeout', 3.0).value)
         self.create_timer(0.5, self.tick)
         self.set_status('位置の推定を待っています')
 
@@ -116,6 +117,12 @@ class MissionNode(Node):
                 self.set_status(f'向きを決めるため {self.init_distance:.0f} m 直進します')
         if self.state == 'init_run' and self.heading_ready:
             self.state = 'convert'
+        if self.state == 'convert' and self.converting is not None:
+            # 返事が来ないことがある（ROS 2 のサービスの返事が落ちる）。しばらく待っても揃わなければ、やり直す
+            waited = (self.get_clock().now() - self.converting['started']).nanoseconds * 1e-9
+            if waited > self.convert_timeout:
+                self.get_logger().warn(f'fromLL の返事が {waited:.0f} 秒来ないので、緯度・経度の変換をやり直します')
+                self.converting = None
         if self.state == 'convert' and self.converting is None:
             if not self.from_ll.service_is_ready():
                 self.set_status('navsat_transform の fromLL サービスを待っています', throttle=10.0)
@@ -126,15 +133,19 @@ class MissionNode(Node):
         points = []
         for s in self.steps:
             points += [s.point] if s.kind == 'latlon' else [s.a, s.b]
-        self.converting = {'points': points, 'xy': [None] * len(points), 'pending': len(points)}
+        conv = {'points': points, 'xy': [None] * len(points), 'pending': len(points),
+                'started': self.get_clock().now()}
+        self.converting = conv
+        self.get_logger().info(f'緯度・経度 {len(points)} 点を fromLL で map 座標に直します')
         for i, (lat, lon) in enumerate(points):
             req = FromLL.Request()
             req.ll_point = GeoPoint(latitude=lat, longitude=lon, altitude=0.0)
             fut = self.from_ll.call_async(req)
-            fut.add_done_callback(lambda f, i=i: self.on_converted(i, f))
+            fut.add_done_callback(lambda f, i=i, conv=conv: self.on_converted(i, f, conv))
 
-    def on_converted(self, i, fut):
-        conv = self.converting
+    def on_converted(self, i, fut, conv):
+        if conv is not self.converting or conv['xy'][i] is not None:
+            return                                   # やり直す前の古い返事
         try:
             p = fut.result().map_point
             conv['xy'][i] = (p.x, p.y)

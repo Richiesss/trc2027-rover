@@ -84,3 +84,23 @@ def test_robust_uses_nearby_free_goal():
     path, goal = gp.plan_path_robust(grid_with(obs), (0.0, 0.0), (10.0, 0.0), min_inflate=0.45)
     assert path is not None
     assert 0.3 < math.hypot(goal[0] - 10.0, goal[1]) <= 2.0
+
+
+def test_hazard_when_watched_but_never_seen():
+    g = gp.ObstacleGrid(gp.GridParams())
+    pts = np.array([[3.0, 0.0]])
+    for _ in range(g.p.watch_needed):
+        g.watch(pts)
+    assert g.occupied()[g.to_cell(3.0, 0.0)]
+    g.clear(pts)                                          # 地面が見えたら穴ではない
+    assert not g.occupied()[g.to_cell(3.0, 0.0)]
+
+
+def test_blocked_area_is_avoided():
+    g = gp.ObstacleGrid(gp.GridParams())
+    g.block(5.0, 0.0, 1.0)
+    path = gp.plan_path(g, (0.0, 0.0), (10.0, 0.0))
+    assert path is not None
+    d = np.hypot(path[:, 0] - 5.0, path[:, 1])
+    assert d.min() > 1.0 + g.p.inflate - 0.3
+    assert len(g.special_points(5.0, 0.0, 2.0)) > 10

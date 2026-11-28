@@ -15,6 +15,7 @@ max_slope より急な斜面は障害物と判定されるので、
 実機では cell_size / height_threshold をフィールドに合わせて調整すること。
 """
 
+import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -126,3 +127,63 @@ def front_distance(obstacles: np.ndarray, corridor_width: float, max_distance: f
     if not np.any(inside):
         return float('inf')
     return float(x[inside].min() - front_offset)
+
+
+# --- 砂地の対策 -------------------------------------------------------------
+
+def tilt_from_gravity(accel) -> tuple:
+    """加速度計の読み（止まっていれば重力の反対向き、車体座標）から (roll, pitch) [rad]。
+
+    roll は正 = 左が上、pitch は正 = 機首下げ（ROS の向き）。
+    """
+    ax, ay, az = (float(v) for v in accel)
+    return math.atan2(ay, az), math.atan2(-ax, math.hypot(ay, az))
+
+
+def level_matrix(roll: float, pitch: float) -> np.ndarray:
+    """車体座標の点を、向き（yaw）はそのままに水平な座標に直す回転行列 Ry(pitch) Rx(roll)。
+
+    坂で車体が傾くと、平らな地面も「斜めの壁」に見えてしまうので、重力の向きでまっすぐに直してから地面を判定する。
+    """
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cr, sr = math.cos(roll), math.sin(roll)
+    ry = np.array([[cp, 0.0, sp], [0.0, 1.0, 0.0], [-sp, 0.0, cp]])
+    rx = np.array([[1.0, 0.0, 0.0], [0.0, cr, -sr], [0.0, sr, cr]])
+    return ry @ rx
+
+
+class PersistenceFilter:
+    """何回か続けて同じ場所に見えた障害物の点だけを残す（舞い上がった砂を消す）。
+
+    点は動かない座標（odom）で比べる。今回の点のマス（cell 四方）のまわり 1 マス以内に、
+    直前の (scans - 1) 回のどのスキャンにも障害物があれば残す。
+    砂の塊は 1〜2 回のスキャンで消えたり流されたりするが、岩や支柱は毎回同じ所に見える。
+    """
+
+    def __init__(self, scans: int = 3, cell: float = 0.3):
+        self.scans = max(1, int(scans))
+        self.cell = cell
+        self.history = []                    # 直前のスキャンの、まわり 1 マスまで広げたマスの番号
+
+    def _keys(self, ij):
+        return ij[:, 0].astype(np.int64) * 1_000_003 + ij[:, 1].astype(np.int64)
+
+    def apply(self, points_fixed: np.ndarray) -> np.ndarray:
+        """points_fixed: 今回の障害物の点（odom 座標の x, y）。戻り値：残す点の印（bool）。"""
+        ij = np.floor(points_fixed[:, :2] / self.cell).astype(np.int64) if len(points_fixed) \
+            else np.empty((0, 2), dtype=np.int64)
+        keep = np.ones(len(ij), dtype=bool)
+        if len(self.history) < self.scans - 1:
+            keep[:] = False                   # まだ見比べる分がたまっていない
+        for prev in self.history:
+            keep &= np.isin(self._keys(ij), prev)
+        if self.scans > 1:
+            cells = np.unique(ij, axis=0) if len(ij) else ij
+            grown = np.vstack([cells + (dx, dy) for dx in (-1, 0, 1) for dy in (-1, 0, 1)]) if len(cells) \
+                else cells
+            self.history.append(np.unique(self._keys(grown)) if len(grown) else np.empty(0, dtype=np.int64))
+            self.history = self.history[-(self.scans - 1):]
+        return keep
+
+    def reset(self):
+        self.history = []

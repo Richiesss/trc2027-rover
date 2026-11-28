@@ -8,6 +8,9 @@ DWA にはその道筋の少し先の点を目指させる。
   - resolution 四方のマス。障害物の点が hits_to_occupy 回以上入ったマスを「ふさがっている」とする
   - 地面の点だけが見えたマスは数を 1 減らす（位置のずれで間違って書いた障害物や、動いた物を消すため）
   - 見えていない所は「通れる」とみなす（楽観的。近づいて見えたら地図が更新され、道筋を引き直す）
+    ただし、すぐ目の前（watch で見張るマス）なのに何回見ても地面の点が来ないマスは「穴・崖のふち」として通れなくする
+    （くぼみの底や崖の下は、ふちの陰になって LiDAR から見えない）。あとで地面が見えたら元に戻す
+  - 砂にはまった・傾きすぎた場所は block で「通らない」にする（見た目では分からないので、消さない）
 道筋:
   - ふさがったマスを robot_radius + safety_margin だけ太らせたうえで、8 近傍の A* で探す
   - 障害物の近くは通りにくく（コストを足す）して、なるべく真ん中を通る
@@ -32,6 +35,7 @@ class GridParams:
     #   マーカーの外を遠回りする道を選んでしまった。0.4 なら 3 m のすき間の真ん中 0.8 m は通常のコスト）
     soft_cost: float = 3.0        # 通りにくさ（1 マス進むコストに足す最大値）
     search_margin: float = 15.0   # 探す範囲：スタートと目標を囲む四角＋この幅 [m]
+    watch_needed: int = 10        # 目の前のマスを何回見張っても地面が見えなければ「穴」とするか
 
 
 class ObstacleGrid:
@@ -41,6 +45,9 @@ class ObstacleGrid:
         self.n = int(round(p.size / p.resolution))
         self.origin = -p.size / 2.0
         self.hits = np.zeros((self.n, self.n), dtype=np.uint16)
+        self.seen = np.zeros((self.n, self.n), dtype=np.uint8)      # 地面が見えた回数（上限 255）
+        self.watched = np.zeros((self.n, self.n), dtype=np.uint8)   # 目の前で見張った回数
+        self.blocked = np.zeros((self.n, self.n), dtype=bool)       # はまった・傾きすぎた場所
 
     def to_cell(self, x, y):
         return (np.floor((np.asarray(x) - self.origin) / self.p.resolution).astype(np.int64),
@@ -68,6 +75,9 @@ class ObstacleGrid:
         i, j = self.to_cell(ground_map[:, 0], ground_map[:, 1])
         ok = (i >= 0) & (i < self.n) & (j >= 0) & (j < self.n)
         cells = np.unique(np.c_[i[ok], j[ok]], axis=0)
+        if len(cells):
+            s = self.seen[cells[:, 0], cells[:, 1]]
+            self.seen[cells[:, 0], cells[:, 1]] = np.minimum(s.astype(np.int32) + 1, 255).astype(np.uint8)
         if obstacles_map is not None and len(obstacles_map):
             oi, oj = self.to_cell(obstacles_map[:, 0], obstacles_map[:, 1])
             busy = set(zip(oi.tolist(), oj.tolist()))
@@ -76,8 +86,48 @@ class ObstacleGrid:
             h = self.hits[cells[:, 0], cells[:, 1]].astype(np.int32)
             self.hits[cells[:, 0], cells[:, 1]] = np.maximum(h - 1, 0).astype(np.uint16)
 
+    def watch(self, points_map: np.ndarray):
+        """すぐ目の前で、地面が見えるはずのマス（map 座標の点）を見張った回数を 1 増やす。"""
+        if len(points_map) == 0:
+            return
+        i, j = self.to_cell(points_map[:, 0], points_map[:, 1])
+        ok = (i >= 0) & (i < self.n) & (j >= 0) & (j < self.n)
+        cells = np.unique(np.c_[i[ok], j[ok]], axis=0)
+        if len(cells):
+            w = self.watched[cells[:, 0], cells[:, 1]]
+            self.watched[cells[:, 0], cells[:, 1]] = np.minimum(w.astype(np.int32) + 1, 255).astype(np.uint8)
+
+    def hazard(self) -> np.ndarray:
+        """目の前で何回見張っても地面が見えないマス（穴・崖のふちの向こう）。"""
+        return (self.watched >= self.p.watch_needed) & (self.seen == 0)
+
+    def block(self, x: float, y: float, radius: float):
+        """(x, y) のまわり radius [m] を通らない場所にする（砂にはまった所など）。"""
+        i, j = self.to_cell(x, y)
+        r = int(math.ceil(radius / self.p.resolution))
+        for di in range(-r, r + 1):
+            for dj in range(-r, r + 1):
+                if (di * di + dj * dj) * self.p.resolution ** 2 <= radius * radius:
+                    ii, jj = i + di, j + dj
+                    if 0 <= ii < self.n and 0 <= jj < self.n:
+                        self.blocked[ii, jj] = True
+
     def occupied(self) -> np.ndarray:
-        return self.hits >= self.p.hits_to_occupy
+        return (self.hits >= self.p.hits_to_occupy) | self.blocked | self.hazard()
+
+    def special_points(self, x: float, y: float, radius: float) -> np.ndarray:
+        """(x, y) のまわり radius [m] 以内の「通らない」「穴」のマスの中心（map 座標）。DWA にも教えるため。"""
+        i0, j0 = self.to_cell(x, y)
+        r = int(math.ceil(radius / self.p.resolution))
+        a0, a1 = max(i0 - r, 0), min(i0 + r + 1, self.n)
+        b0, b1 = max(j0 - r, 0), min(j0 + r + 1, self.n)
+        sub = self.blocked[a0:a1, b0:b1] | ((self.watched[a0:a1, b0:b1] >= self.p.watch_needed)
+                                            & (self.seen[a0:a1, b0:b1] == 0))
+        ii, jj = np.nonzero(sub)
+        if len(ii) == 0:
+            return np.empty((0, 2))
+        cx, cy = self.to_xy(ii + a0, jj + b0)
+        return np.c_[cx, cy]
 
 
 def _dilate(mask: np.ndarray, radius_cells: int) -> np.ndarray:

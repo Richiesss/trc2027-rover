@@ -80,3 +80,34 @@ def test_safety_filter():
     assert filter_command(0.5, 0.1, blocked=True) == (0.0, 0.1, True)     # 前進は止め、回転は通す
     assert filter_command(-0.3, 0.0, blocked=True) == (-0.3, 0.0, False)  # 後退は通す
     assert filter_command(0.5, 0.1, blocked=False) == (0.5, 0.1, False)
+
+
+def test_level_matrix_undoes_tilt():
+    import math
+    roll, pitch = math.radians(8.0), math.radians(-12.0)
+    acc = np.array([-math.sin(pitch), math.cos(pitch) * math.sin(roll), math.cos(pitch) * math.cos(roll)]) * 9.81
+    r, p = om.tilt_from_gravity(acc)
+    assert math.isclose(r, roll, abs_tol=1e-9) and math.isclose(p, pitch, abs_tol=1e-9)
+    assert np.allclose(om.level_matrix(r, p) @ acc, [0.0, 0.0, 9.81])
+
+
+def test_persistence_filter_drops_one_scan_dust_keeps_rock():
+    f = om.PersistenceFilter(scans=3, cell=0.3)
+    rock = np.array([[5.0, 0.0], [5.1, 0.1]])
+    for k in range(3):
+        dust = np.array([[2.0 + k, 3.0 - k]])             # 毎回ちがう所に出る砂
+        keep = f.apply(np.vstack([rock + 0.05 * k, dust]))
+    assert keep[:2].all() and not keep[2]
+
+
+def test_tilted_flat_ground_is_not_obstacle_after_leveling():
+    import math
+    rng = np.random.default_rng(0)
+    xy = rng.uniform(-8.0, 8.0, (4000, 2))
+    ground = np.c_[xy, np.zeros(len(xy))]
+    pitch = math.radians(-28.0)                           # 大きく機首上げ（急な坂の登り口）
+    body = ground @ om.level_matrix(0.0, pitch)           # 水平 → 車体（level の逆回転）
+    obs, _ = om.segment(body)
+    assert obs.sum() > 50                                 # 傾いたままだと地面が障害物に見える
+    obs, _ = om.segment(body @ om.level_matrix(0.0, pitch).T)
+    assert obs.sum() == 0

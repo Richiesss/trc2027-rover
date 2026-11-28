@@ -77,7 +77,7 @@ def make_rock(x: float, y: float, size: float = 0.8, height: float = 0.5, seed: 
 # 試験用の配置。座標はスタート地点が原点、x がスタート時の前方、y が左（map 座標と同じ）。
 # 置く前に、この範囲にある元の仮想フィールドの物体は取り除く（配置どうしが混ざらないように）。
 LAYOUT_ZONE = ((1.0, 17.0), (-8.0, 8.0))
-LAYOUTS = ('default', 'gap', 'narrow', 'dead_end', 'clutter', 'checkpoints')
+LAYOUTS = ('default', 'gap', 'narrow', 'dead_end', 'clutter', 'checkpoints', 'open')
 
 
 def _wall(rng, x0, y0, x1, y1, height=0.6, thickness=0.3, density=300):
@@ -115,9 +115,10 @@ def make_layout(name: str, seed: int = 0) -> np.ndarray:
     dead_end : スタート側に口を開けた U 字（奥行き 5 m・幅 4 m）。まっすぐ行くと袋小路
     checkpoints : 自律ミッションのチェックポイント用のマーカーの柱（CHECKPOINT_MARKERS）
     clutter  : x = 4〜9.6 に、千鳥の格子に沿って岩を 11 個ばらまく（岩どうしの間は 1.4 m 以上）
+    open     : 何も置かない（範囲の中の物体を取り除くだけ。砂丘やくぼみなど、地形の試験用）
     """
     rng = np.random.default_rng(seed + 3000)
-    if name == 'default':
+    if name in ('default', 'open'):
         return np.empty((0, 3))
     if name in ('gap', 'narrow'):
         half = 1.0 if name == 'gap' else 0.5
@@ -190,6 +191,88 @@ def scan(objects: np.ndarray, ground: np.ndarray, base_e: float, base_n: float, 
         parts.append(_visible(ground, base_e, base_n, base_yaw, lidar_x, lidar_z,
                               min_range, max_range, ground_points, rng))
     cloud = np.vstack(parts)
+    if noise > 0.0:
+        cloud = cloud + rng.normal(0.0, noise, cloud.shape)
+    return cloud.astype(np.float32)
+
+
+def make_ground_on(terrain, seed: int = 0, size: float = 60.0, n: int = 150000) -> np.ndarray:
+    """地形 terrain（fake_terrain.Terrain）に沿った地面の点（world 座標）。
+
+    点の水平な位置は make_ground と同じ。くぼみの壁のような急な所は点がまばらになる（実際の LiDAR と同じ）。
+    """
+    rng = np.random.default_rng(seed + 1000)
+    half = size / 2.0
+    x = rng.uniform(-half, half, n)
+    y = rng.uniform(-half, half, n)
+    return np.c_[x, y, terrain.height(x, y)]
+
+
+def make_ground_grid(terrain, seed: int = 0, size: float = 60.0, spacing: float = 0.125) -> np.ndarray:
+    """地形 terrain に沿った地面の点（world 座標）を、少しずらした格子（spacing 間隔）に置く。
+
+    どのマス（0.25 m 四方）にも必ず地面の点があるので、「地面が見えないマス = 穴」の判定を試せる。
+    点は world に固定（スキャンごとに同じ点が見える）。
+    """
+    rng = np.random.default_rng(seed + 1000)
+    half = size / 2.0
+    g = np.arange(-half, half, spacing) + spacing / 2.0
+    x, y = np.meshgrid(g, g)
+    x = x.ravel() + rng.uniform(-0.4, 0.4, x.size) * spacing
+    y = y.ravel() + rng.uniform(-0.4, 0.4, y.size) * spacing
+    return np.c_[x, y, terrain.height(x, y)]
+
+
+def place_on(terrain, points: np.ndarray) -> np.ndarray:
+    """物体の点（地面 z = 0 が基準）を、地形の上に載せる。物体ごとではなく点ごとに地面の高さを足す簡略版。"""
+    if terrain.flat or len(points) == 0:
+        return points
+    out = points.copy()
+    out[:, 2] += terrain.height(points[:, 0], points[:, 1])
+    return out
+
+
+def scan_3d(objects: np.ndarray, ground: np.ndarray, terrain, base: np.ndarray, rot: np.ndarray,
+            lidar_x: float, lidar_z: float, min_range: float, max_range: float,
+            max_points: int, noise: float, rng: np.random.Generator,
+            ground_points: int = 3000, extra: np.ndarray = None) -> np.ndarray:
+    """傾いた車体から見た 1 回分の点群（sensor 座標、float32）。地形の陰になる点は消す。
+
+    base: 車体（base_link の原点 = 車体中心の地面）の world 座標。rot: 車体 → world の回転行列。
+    ground: 地面の点（world に固定。近いほど多く選ぶ）。None なら、スキャンごとに地形 terrain の上から
+            選び直す（水平距離が対数一様）。選び直すと、地面の点どうしは毎回ちがう所になるので、
+            LiDAR オドメトリの手がかりにならない（模様のない平らな砂地）。
+    extra: そのスキャンだけに見える点（舞い上がった砂など、world 座標）。
+    """
+    sensor = base + rot @ np.array([lidar_x, 0.0, lidar_z])
+    if ground is None:
+        lo, hi = max(min_range, 0.3), max_range
+        r = lo * (hi / lo) ** rng.random(ground_points)
+        a = rng.uniform(-math.pi, math.pi, ground_points)
+        gx, gy = sensor[0] + r * np.cos(a), sensor[1] + r * np.sin(a)
+        ground = np.c_[gx, gy, terrain.height(gx, gy)]
+
+    def visible(points, limit, falloff=False):
+        if len(points) == 0:
+            return np.empty((0, 3))
+        d = points - sensor
+        r = np.linalg.norm(d, axis=1)
+        ok = (r >= min_range) & (r <= max_range)
+        pts, r = points[ok], r[ok]
+        if len(pts) > limit:
+            # falloff：実際の LiDAR のように、近いほど点が多い（1/r^2）。一様に選ぶと足もとの地面がまばらになる
+            if falloff:     # 重み付きで重複なしに選ぶ（鍵 = log(u) / 重み の大きい順）
+                keys = np.log(rng.random(len(pts))) * np.maximum(r, 1.0) ** 2
+                pts = pts[np.argpartition(-keys, limit)[:limit]]
+            else:
+                pts = pts[rng.choice(len(pts), limit, replace=False)]
+        return pts[~terrain.occluded(sensor, pts)]
+
+    parts = [visible(objects, max_points), visible(ground, ground_points, falloff=True)]
+    if extra is not None and len(extra):
+        parts.append(visible(extra, len(extra)))
+    world = np.vstack(parts)
+    cloud = (world - sensor) @ rot                 # = rot^T (p - sensor)
     if noise > 0.0:
         cloud = cloud + rng.normal(0.0, noise, cloud.shape)
     return cloud.astype(np.float32)

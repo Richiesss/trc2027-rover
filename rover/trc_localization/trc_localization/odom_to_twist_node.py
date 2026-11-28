@@ -7,14 +7,25 @@ robot_localization の推奨どおり、速度（ローバー基準の前後・�
 
 あわせて、ありえない速さ（max_speed / max_yaw_rate 超え）の値は捨てる（点群の合わせ間違いで位置が跳んだとき）。
 
-入力:  odometry     nav_msgs/Odometry（pose だけ使う）
+砂地の対策（周りに何もない砂地）:
+  点群に手がかり（地面以外の物）がほとんどないと、LiDAR オドメトリは前後・左右の動きを読めず、
+  止まっている・跳んだと誤る（シミュレーションで GNSS が 30 秒途切れたとき 9 m ずれた）。
+  obstacle_detector が「手がかりが少ない」（lidar_degenerate）と知らせている間は LiDAR オドメトリを使わず、
+  速度指令（cmd_vel）×（1 − 空転の割合）を速度として出す。空転の割合は、LiDAR オドメトリが使えるあいだに
+  速度指令と実際の速さを比べて覚えておく。
+
+入力:  odometry          nav_msgs/Odometry（pose だけ使う）
+       cmd_vel           geometry_msgs/Twist（モータへの速度指令）
+       lidar_degenerate  std_msgs/Bool（true の間は速度指令から速度を作る）
 出力:  twist        nav_msgs/Odometry（twist だけ有効、child_frame_id は base_frame）
 """
 
 import math
 
 import rclpy
+from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
+from std_msgs.msg import Bool
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 
@@ -48,15 +59,69 @@ class OdomToTwist(Node):
         self.yaw_rate_sigma = float(self.declare_parameter('yaw_rate_sigma', 0.03).value)  # [rad/s]
         self.prev = None
         self.rejected = 0
+        # 手がかりが少ないときの代わり（速度指令から作る速度）
+        self.cmd_sigma = float(self.declare_parameter('cmd_speed_sigma', 0.15).value)   # [m/s]
+        self.slip = float(self.declare_parameter('slip_initial', 0.15).value)          # 空転の割合（覚えた値）
+        self.slip_max = float(self.declare_parameter('slip_max', 0.6).value)
+        self.cmd_timeout = float(self.declare_parameter('cmd_timeout', 0.5).value)
+        self.cmd = None                                 # (v, w, 受信時刻)
+        self.degenerate = False
+        self.frame_id = 'odom'
         self.pub = self.create_publisher(Odometry, 'twist', 10)
         self.create_subscription(Odometry, 'odometry', self.on_odom, 20)
+        self.create_subscription(Twist, 'cmd_vel', self.on_cmd, 10)
+        self.create_subscription(Bool, 'lidar_degenerate', self.on_degenerate, 10)
+        self.create_timer(0.1, self.publish_from_cmd)
+
+    def on_cmd(self, msg: Twist):
+        self.cmd = (msg.linear.x, msg.angular.z, self.get_clock().now())
+
+    def on_degenerate(self, msg: Bool):
+        if msg.data != self.degenerate:
+            if msg.data:
+                self.get_logger().warn(f'点群に手がかりが少ないので、LiDAR オドメトリの代わりに速度指令から速さを出します'
+                                       f'（空転 {self.slip * 100:.0f} % として）')
+            else:
+                self.get_logger().info('点群の手がかりが戻ったので、LiDAR オドメトリに戻します')
+        self.degenerate = msg.data
+
+    def fresh_cmd(self):
+        if self.cmd is None or (self.get_clock().now() - self.cmd[2]).nanoseconds * 1e-9 > self.cmd_timeout:
+            return 0.0, 0.0
+        return self.cmd[0], self.cmd[1]
+
+    def learn_slip(self, vx: float):
+        """LiDAR オドメトリが使えるあいだに、速度指令と実際の速さから空転の割合を覚える。"""
+        v, w = self.fresh_cmd()
+        if v < 0.2 or abs(w) > 0.2:
+            return
+        slip = 1.0 - vx / v
+        if 0.0 <= slip <= self.slip_max:                 # はまっている最中などは覚えない
+            self.slip = 0.98 * self.slip + 0.02 * slip
+
+    def publish_from_cmd(self):
+        if not self.degenerate:
+            return
+        v, _ = self.fresh_cmd()
+        out = Odometry()
+        out.header.stamp = self.get_clock().now().to_msg()
+        out.header.frame_id = self.frame_id
+        out.child_frame_id = self.base_frame
+        out.twist.twist.linear.x = v * (1.0 - self.slip)
+        cov = [0.0] * 36
+        cov[0] = cov[7] = self.cmd_sigma ** 2
+        cov[14] = cov[21] = cov[28] = 1e-3
+        cov[35] = 1.0
+        out.twist.covariance = cov
+        self.pub.publish(out)
 
     def on_odom(self, msg: Odometry):
         t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         p = msg.pose.pose
         cur = (t, p.position.x, p.position.y, yaw_of(p.orientation))
         prev, self.prev = self.prev, cur
-        if prev is None:
+        self.frame_id = msg.header.frame_id
+        if prev is None or self.degenerate:
             return
         v = body_velocity(prev, cur)
         if v is None:
@@ -82,6 +147,7 @@ class OdomToTwist(Node):
         cov[35] = self.yaw_rate_sigma ** 2
         out.twist.covariance = cov
         self.pub.publish(out)
+        self.learn_slip(vx)
 
 
 def main(args=None):

@@ -7,6 +7,7 @@
   ros2 launch trc_bringup sim_test.launch.py waypoints:="15,0; 15,10; 0,10; 0,0"   # 四角く回る
   ros2 launch trc_bringup sim_test.launch.py layout:=checkpoints mission:=<ミッションファイル>  # 緯度・経度のチェックポイント
     （ミッションファイルの例は scripts/make_sim_mission.py で作れる）
+  ros2 launch trc_bringup sim_test.launch.py terrain:=dunes slip:=0.15 dust:=1.0   # 砂地（砂丘・空転・舞う砂）
   ros2 launch trc_bringup sim_test.launch.py driver:=script obstacle_ahead:=6.0      # 決まった道筋（手前で止まるだけ）
 
 起動するもの:
@@ -79,6 +80,19 @@ def generate_launch_description():
                               description='LiDAR の点群が止まる "開始秒:続く秒; ..."'),
         DeclareLaunchArgument('imu_bias', default_value='0.0',
                               description='IMU の回転の速さのずれ [rad/s]'),
+        # --- 砂地の試験（fake_terrain.py）---
+        DeclareLaunchArgument('terrain', default_value='flat',
+                              description='地形: flat（ゆるい起伏・車体は水平）/ dunes（登れる砂丘）/ hill（コースの途中に大きな砂丘）/ steep（登れない砂丘）/ pit（くぼみ）'),
+        DeclareLaunchArgument('slip', default_value='0.0',
+                              description='平らな所でも起きるタイヤの空転の割合（砂地なら 0.1〜0.2）'),
+        DeclareLaunchArgument('soft_sand', default_value='',
+                              description='やわらかい砂（はまると前に進めない）"x,y,半径; ..."（map 座標）'),
+        DeclareLaunchArgument('dust', default_value='0.0',
+                              description='舞い上がる砂：1 回のスキャンあたりの砂の塊の数の平均'),
+        DeclareLaunchArgument('ground_mode', default_value='fixed',
+                              description='地面の点: fixed（world に固定）/ resample（毎回選び直す＝模様のない砂地で LiDAR オドメトリの手がかりにならない）'),
+        DeclareLaunchArgument('world', default_value='default',
+                              description='周りの物体: default（支柱・岩・壁）/ bare（何もない砂地）'),
         DeclareLaunchArgument('mission', default_value='',
                               description='自律ミッションのファイル（緯度・経度のチェックポイント）。指定すると waypoints は使わない'),
         DeclareLaunchArgument('safety', default_value='true',
@@ -156,6 +170,12 @@ def generate_launch_description():
                     'gnss_jump': ParameterValue(LaunchConfiguration('gnss_jump'), value_type=str),
                     'lidar_drop': ParameterValue(LaunchConfiguration('lidar_drop'), value_type=str),
                     'imu_bias': ParameterValue(LaunchConfiguration('imu_bias'), value_type=float),
+                    'terrain': ParameterValue(LaunchConfiguration('terrain'), value_type=str),
+                    'slip': ParameterValue(LaunchConfiguration('slip'), value_type=float),
+                    'soft_sand': ParameterValue(LaunchConfiguration('soft_sand'), value_type=str),
+                    'dust': ParameterValue(LaunchConfiguration('dust'), value_type=float),
+                    'world': ParameterValue(LaunchConfiguration('world'), value_type=str),
+                    'ground_mode': ParameterValue(LaunchConfiguration('ground_mode'), value_type=str),
                 }],
             ),
         ]),
