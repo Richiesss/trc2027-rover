@@ -15,6 +15,9 @@
   /fake/world     sensor_msgs/PointCloud2 仮想フィールド全体（map 座標、表示用、10 秒ごと）
   /fake/truth_path nav_msgs/Path          本当に通った道筋（map 座標、表示用）
   /fake/obstacles  sensor_msgs/PointCloud2 物体だけの点（map 座標、地面を除く。シナリオ試験の最接近の計算用）
+  /fake/robot      visualization_msgs/MarkerArray 本当の姿勢の車体（高さ・傾きつき、map 座標。3D 表示用）
+  /fake/cloud_map  sensor_msgs/PointCloud2 LiDAR の点群を本当の姿勢で map 座標に置いたもの（3D 表示用、5 Hz）
+                   位置推定は平面なので、ふつうの /unilidar/cloud は坂で傾いて・埋まって見える
 
 砂地の試験（terrain・slip・soft_sand・dust・world。fake_terrain.py）:
   terrain:=dunes / steep / pit で砂丘やくぼみを置く。車体は地面に沿って傾き、
@@ -38,6 +41,7 @@ from nav_msgs.msg import Odometry, Path
 from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from std_msgs.msg import String
+from visualization_msgs.msg import Marker, MarkerArray
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from sensor_msgs.msg import Imu, NavSatFix, NavSatStatus, PointCloud2, PointField
@@ -152,7 +156,11 @@ class FakeSensors(Node):
         self.world_pub = self.create_publisher(PointCloud2, '/fake/world', latched)
         self.truth_path_pub = self.create_publisher(Path, '/fake/truth_path', 10)
         self.objects_pub = self.create_publisher(PointCloud2, '/fake/obstacles', latched)
-        self.event_pub = self.create_publisher(String, '/fake/event', 10)   # 転倒・転落の間、毎回出す（残らない）
+        self.event_pub = self.create_publisher(String, '/fake/event', 10)
+        # 3D 表示用（本当の姿勢の車体と点群）。重いときは view_3d:=false
+        self.view_3d = bool(self.declare_parameter('view_3d', True).value)
+        self.robot_pub = self.create_publisher(MarkerArray, '/fake/robot', 10)
+        self.cloud_map_pub = self.create_publisher(PointCloud2, '/fake/cloud_map', 5)   # 転倒・転落の間、毎回出す（残らない）
         self.truth_path = Path()
         self.truth_path.header.frame_id = 'map'
 
@@ -264,7 +272,10 @@ class FakeSensors(Node):
         self.imu_pub.publish(imu)
 
         if self.tick % 5 == 0 and self.publish_cloud and not self.active(self.lidar_drops):   # 10 Hz
-            self.cloud_pub.publish(self.make_cloud(now))
+            pts = self.make_cloud_points()
+            self.cloud_pub.publish(self.to_cloud(pts, now, 'unilidar_lidar'))
+            if self.view_3d and self.tick % 10 == 0:    # 5 Hz
+                self.publish_view(pts, now)
 
         if self.tick % 5 == 0 and self.publish_odom:    # 10 Hz
             # オドメトリ座標 = スタート地点・スタート時の向きが基準
@@ -391,7 +402,47 @@ class FakeSensors(Node):
         oy = s * objects[:, 0] + c * objects[:, 1]
         self.objects_pub.publish(self.to_cloud(np.c_[ox, oy, objects[:, 2]].astype(np.float32), stamp, 'map'))
 
-    def make_cloud(self, stamp):
+    def truth_map_pose(self):
+        """本当の姿勢（map 座標）：位置 (x, y, z) と、車体 → map の回転行列。"""
+        x, y = self.enu_to_map(self.e, self.n)
+        return np.array([x, y, self.z]), ft.rotation(self.yaw - self.heading0, self.pitch, self.roll)
+
+    def publish_view(self, pts, stamp):
+        pos, rot = self.truth_map_pose()
+        sensor = pos + rot @ np.array([self.lidar_x, 0.0, self.lidar_z])
+        cloud = (pts.astype(float) @ rot.T + sensor).astype(np.float32)
+        self.cloud_map_pub.publish(self.to_cloud(cloud, stamp, 'map'))
+        q = rotation_to_quaternion(rot)
+        body = Marker()
+        body.header.stamp, body.header.frame_id = stamp, 'map'
+        body.ns, body.id, body.type, body.action = 'truth', 0, Marker.CUBE, Marker.ADD
+        center = pos + rot @ np.array([0.0, 0.0, 0.25])     # 車体の箱の中心（地面から 0.25 m）
+        body.pose.position.x, body.pose.position.y, body.pose.position.z = (float(v) for v in center)
+        body.pose.orientation.x, body.pose.orientation.y, body.pose.orientation.z, body.pose.orientation.w = q
+        body.scale.x, body.scale.y, body.scale.z = 1.0, 0.8, 0.4
+        body.color.r, body.color.g, body.color.b, body.color.a = 1.0, 0.55, 0.1, 0.9
+        if self.dead:
+            body.color.r, body.color.g, body.color.b = 0.9, 0.1, 0.1
+        arrow = Marker()
+        arrow.header = body.header
+        arrow.ns, arrow.id, arrow.type, arrow.action = 'truth', 1, Marker.ARROW, Marker.ADD
+        top = pos + rot @ np.array([0.0, 0.0, 0.5])
+        arrow.pose.position.x, arrow.pose.position.y, arrow.pose.position.z = (float(v) for v in top)
+        arrow.pose.orientation = body.pose.orientation
+        arrow.scale.x, arrow.scale.y, arrow.scale.z = 0.8, 0.12, 0.12
+        arrow.color.r, arrow.color.g, arrow.color.b, arrow.color.a = 1.0, 1.0, 1.0, 1.0
+        text = Marker()
+        text.header = body.header
+        text.ns, text.id, text.type, text.action = 'truth', 2, Marker.TEXT_VIEW_FACING, Marker.ADD
+        text.pose.position.x, text.pose.position.y = float(pos[0]), float(pos[1])
+        text.pose.position.z = float(pos[2]) + 1.2
+        text.scale.z = 0.35
+        text.color.r, text.color.g, text.color.b, text.color.a = 1.0, 1.0, 1.0, 1.0
+        text.text = (f'高さ {self.z:+.2f} m  前後 {math.degrees(-self.pitch):+.0f}°  左右 {math.degrees(self.roll):+.0f}°'
+                     f'  空転 {self.slip_now * 100:.0f}%' + (f'  {self.dead}' if self.dead else ''))
+        self.robot_pub.publish(MarkerArray(markers=[body, arrow, text]))
+
+    def make_cloud_points(self):
         if self.sandy or self.realistic_cloud:
             ground = None if (self.cloud_ground and self.ground_mode == 'resample') else self.ground
             pts = fake_world.scan_3d(self.world, ground, self.terrain,
@@ -399,11 +450,10 @@ class FakeSensors(Node):
                                      self.lidar_x, self.lidar_z, self.cloud_min_range,
                                      self.cloud_max_range, self.cloud_points, self.cloud_noise, self.rng,
                                      extra=self.dust.step(self.e, self.n))
-            return self.to_cloud(pts, stamp, 'unilidar_lidar')
-        pts = fake_world.scan(self.world, self.ground, self.e, self.n, self.yaw,
-                              self.lidar_x, self.lidar_z, self.cloud_min_range,
-                              self.cloud_max_range, self.cloud_points, self.cloud_noise, self.rng)
-        return self.to_cloud(pts, stamp, 'unilidar_lidar')
+            return pts
+        return fake_world.scan(self.world, self.ground, self.e, self.n, self.yaw,
+                               self.lidar_x, self.lidar_z, self.cloud_min_range,
+                               self.cloud_max_range, self.cloud_points, self.cloud_noise, self.rng)
 
     @staticmethod
     def to_cloud(pts, stamp, frame_id):
@@ -440,6 +490,15 @@ class FakeSensors(Node):
         msg.position_covariance = [var, 0.0, 0.0, 0.0, var, 0.0, 0.0, 0.0, 4 * var]
         msg.position_covariance_type = NavSatFix.COVARIANCE_TYPE_KNOWN
         return msg
+
+
+def rotation_to_quaternion(r):
+    """回転行列 → (x, y, z, w)"""
+    w = math.sqrt(max(0.0, 1.0 + r[0, 0] + r[1, 1] + r[2, 2])) / 2.0
+    x = math.copysign(math.sqrt(max(0.0, 1.0 + r[0, 0] - r[1, 1] - r[2, 2])) / 2.0, r[2, 1] - r[1, 2])
+    y = math.copysign(math.sqrt(max(0.0, 1.0 - r[0, 0] + r[1, 1] - r[2, 2])) / 2.0, r[0, 2] - r[2, 0])
+    z = math.copysign(math.sqrt(max(0.0, 1.0 - r[0, 0] - r[1, 1] + r[2, 2])) / 2.0, r[1, 0] - r[0, 1])
+    return x, y, z, w
 
 
 def main(args=None):

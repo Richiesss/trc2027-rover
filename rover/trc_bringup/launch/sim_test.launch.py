@@ -82,7 +82,7 @@ def generate_launch_description():
                               description='IMU の回転の速さのずれ [rad/s]'),
         # --- 砂地の試験（fake_terrain.py）---
         DeclareLaunchArgument('terrain', default_value='flat',
-                              description='地形: flat（ゆるい起伏・車体は水平）/ dunes（登れる砂丘）/ steep（登れない砂丘）/ pit（くぼみ）'),
+                              description='地形: flat（ゆるい起伏・車体は水平）/ dunes（登れる砂丘）/ hill（コースの途中に大きな砂丘）/ steep（登れない砂丘）/ pit（くぼみ）'),
         DeclareLaunchArgument('slip', default_value='0.0',
                               description='平らな所でも起きるタイヤの空転の割合（砂地なら 0.1〜0.2）'),
         DeclareLaunchArgument('soft_sand', default_value='',

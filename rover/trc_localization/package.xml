@@ -7,6 +7,7 @@
   <maintainer email="richiesss@users.noreply.github.com">Ryo Shimano</maintainer>
   <license>Apache-2.0</license>
 
+  <exec_depend>visualization_msgs</exec_depend>
   <exec_depend>rclpy</exec_depend>
   <exec_depend>nav_msgs</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>

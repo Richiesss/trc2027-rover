@@ -3,6 +3,8 @@
 地形の種類（terrain）:
   flat   : これまでと同じ、ゆるい起伏（±8 cm、波長 4 m）だけ
   dunes  : 通り道に、登れる砂丘が 2 つ（高さ 0.6 m・0.8 m。細かい起伏と合わせて、いちばん急な所で 13° ほど）
+  hill   : チェックポイントのコース（layout:=checkpoints）の CP1 と CP2 の間に、高さ 1.3 m の大きな砂丘
+           （いちばん急な所で 10° ほど。細かい起伏と合わせて 16° ほど）。登って越える
   steep  : 通り道を、登れない急な砂丘（高さ 1.5 m、40° ほど）がふさぐ。左右の端は回り込める
   pit    : 通り道に、深さ 1 m・半径 1.5 m のくぼみ（崖のふち）。落ちたら終わり
 
@@ -22,12 +24,13 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-TERRAINS = ('flat', 'dunes', 'steep', 'pit')
+TERRAINS = ('flat', 'dunes', 'hill', 'steep', 'pit')
 
 # 地形の特徴（map 座標）。(中心 x, 中心 y, 高さ, 前後の広がり σx, 左右の広がり σy)。高さが負ならくぼみ
 FEATURES = {
     'flat': [],
     'dunes': [('hill', 6.0, 0.0, 0.6, 3.0, 3.0), ('hill', 12.5, 1.0, 0.8, 3.5, 3.5)],
+    'hill': [('hill', 10.5, -2.5, 1.3, 4.5, 4.5)],
     'steep': [('hill', 8.0, 0.0, 1.5, 1.0, 2.5)],
     'pit': [('pit', 8.0, 0.0, -1.0, 1.5, 1.5)],
 }
