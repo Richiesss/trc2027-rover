@@ -118,6 +118,8 @@ class LocalPlanner(Node):
         self.recoveries = 0                              # いまのウェイポイントで下がった回数
         self.tilt = (0.0, 0.0)
         self.local_pose = None                           # (x, y, 受信時刻)：odom 座標
+        self.skip_time = dp('skip_time', 2.0)            # 目標のそばの障害物がこの秒数続いたら次へ
+        self.blocked_goal_steps = 0
         self.last_v = 0.0
         self.grid = gp.ObstacleGrid(gp.GridParams(inflate=self.p.robot_radius + self.p.safety_margin))
         self.path = None
@@ -287,8 +289,13 @@ class LocalPlanner(Node):
         obs = self.obstacles[0]
         special = self.grid.special_points(x, y, 5.0)        # 「通らない」所と「穴」も DWA に教える
         obs_all = np.vstack([obs, dwa.to_base(x, y, yaw, special)]) if len(special) else obs
-        if math.hypot(*goal) < 2.0 and len(obs) and \
-                np.hypot(obs[:, 0] - goal[0], obs[:, 1] - goal[1]).min() < self.p.robot_radius + self.p.safety_margin:
+        # 目標のすぐそばに障害物があるときは次へ進む。ただし一瞬の誤検出（舞う砂・坂の見え方）で
+        # チェックポイントを飛ばさないよう、skip_time 秒続いたときだけ
+        near = math.hypot(*goal) < 2.0 and len(obs) and \
+            np.hypot(obs[:, 0] - goal[0], obs[:, 1] - goal[1]).min() < self.p.robot_radius + self.p.safety_margin
+        self.blocked_goal_steps = self.blocked_goal_steps + 1 if near else 0
+        if self.blocked_goal_steps >= int(self.skip_time * 10):
+            self.blocked_goal_steps = 0
             self.get_logger().warn(f'ウェイポイント ({gx:.1f}, {gy:.1f}) は障害物に近すぎて行けないので、次へ進みます')
             self.waypoints.pop(0)
             self.replan()
